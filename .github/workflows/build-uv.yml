@@ -35,25 +35,22 @@ jobs:
     needs: check-version
     if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        arch: [aarch64, arm, x86_64, i686]
     steps:
       - uses: actions/checkout@v4
       
-      - name: Clone termux-packages
-        run: git clone --depth=1 https://github.com/termux/termux-packages
-      
-      - name: Patch UV package
+      - name: Build UV for aarch64
         run: |
           VERSION="${{ needs.check-version.outputs.uv_version }}"
+          
+          # Clone termux-packages
+          git clone --depth=1 https://github.com/termux/termux-packages
           cd termux-packages
           
           # Update version and skip checksum
           sed -i "s/TERMUX_PKG_VERSION=.*/TERMUX_PKG_VERSION=\"$VERSION\"/" packages/uv/build.sh
           sed -i "s/TERMUX_PKG_SHA256=.*/TERMUX_PKG_SHA256=SKIP_CHECKSUM/" packages/uv/build.sh
           
-          # Create patch file
+          # Create patch
           cat > packages/uv/0002-fix-android-platform-detection.patch << 'EOF'
           --- a/crates/uv-python/python/get_interpreter_info.py
           +++ b/crates/uv-python/python/get_interpreter_info.py
@@ -70,17 +67,15 @@ jobs:
           EOF
           
           # Patch build.sh
-          sed -i '/touch "${TERMUX_PKG_BUILDDIR}\/android.toolchain.cmake"/a\\t# Fix Android platform detection for Python <3.13 (issue #9559)\n\tpatch -p1 -i "${TERMUX_PKG_BUILDER_DIR}"/0002-fix-android-platform-detection.patch' packages/uv/build.sh
-      
-      - name: Build package
-        run: |
-          cd termux-packages
-          ./scripts/run-docker.sh ./build-package.sh -I -a ${{ matrix.arch }} uv
+          sed -i '/touch "${TERMUX_PKG_BUILDDIR}\/android.toolchain.cmake"/a\\t# Fix Android platform detection\n\tpatch -p1 -i "${TERMUX_PKG_BUILDER_DIR}"/0002-fix-android-platform-detection.patch' packages/uv/build.sh
+          
+          # Build
+          ./scripts/run-docker.sh ./build-package.sh -I -a aarch64 uv
           
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: uv-${{ matrix.arch }}
+          name: uv-aarch64
           path: termux-packages/output/*.deb
 
   release:
@@ -106,15 +101,11 @@ jobs:
             
             ## Installation
             
-            Download the appropriate .deb for your architecture:
-            - `aarch64` - 64-bit ARM (most modern Android devices)
-            - `arm` - 32-bit ARM (older devices)
-            - `x86_64` - 64-bit x86 (emulators)
-            - `i686` - 32-bit x86 (older emulators)
+            Download the .deb for aarch64 (64-bit ARM - most Android devices):
             
             ```bash
             pkg install wget
-            wget https://github.com/${{ github.repository }}/releases/download/${{ needs.check-version.outputs.uv_version }}/uv_<version>_<arch>.deb
+            wget https://github.com/${{ github.repository }}/releases/download/${{ needs.check-version.outputs.uv_version }}/uv_<version>_aarch64.deb
             pkg install ./uv_*.deb
             ```
             
