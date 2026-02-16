@@ -1,0 +1,147 @@
+name: Refresh Build Caches
+
+on:
+  schedule:
+    # Run every 3 days at 3 AM UTC
+    - cron: '0 3 */3 * *'
+  workflow_dispatch:
+    inputs:
+      cache_to_refresh:
+        description: 'Which cache to refresh'
+        required: false
+        type: choice
+        default: 'all'
+        options:
+          - all
+          - docker
+          - termux-packages
+          - cargo
+
+jobs:
+  refresh-caches:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Determine what to refresh
+        id: refresh
+        run: |
+          CACHE_TYPE="${{ github.event.inputs.cache_to_refresh }}"
+          if [ -z "$CACHE_TYPE" ] || [ "$CACHE_TYPE" = "all" ]; then
+            echo "docker=true" >> $GITHUB_OUTPUT
+            echo "termux=true" >> $GITHUB_OUTPUT
+            echo "cargo=true" >> $GITHUB_OUTPUT
+            echo "🔄 Refreshing all caches"
+          else
+            echo "docker=$([[ $CACHE_TYPE == 'docker' ]] && echo true || echo false)" >> $GITHUB_OUTPUT
+            echo "termux=$([[ $CACHE_TYPE == 'termux-packages' ]] && echo true || echo false)" >> $GITHUB_OUTPUT
+            echo "cargo=$([[ $CACHE_TYPE == 'cargo' ]] && echo true || echo false)" >> $GITHUB_OUTPUT
+            echo "🔄 Refreshing $CACHE_TYPE cache only"
+          fi
+      
+      # Refresh Docker cache
+      - name: Refresh Docker image cache
+        if: steps.refresh.outputs.docker == 'true'
+        run: |
+          echo "🐳 Pulling latest Termux builder image..."
+          docker pull termux/package-builder:latest
+          
+          mkdir -p /tmp/docker-save
+          echo "💾 Saving Docker image..."
+          docker save termux/package-builder:latest -o /tmp/docker-save/termux-builder.tar
+          
+          SIZE=$(du -h /tmp/docker-save/termux-builder.tar | cut -f1)
+          echo "✅ Docker image cached ($SIZE)"
+          
+      - name: Cache Docker image
+        if: steps.refresh.outputs.docker == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/docker-save
+          key: termux-builder-image-v1
+          
+      # Refresh termux-packages cache
+      - name: Refresh termux-packages repo
+        if: steps.refresh.outputs.termux == 'true'
+        run: |
+          echo "📦 Cloning termux-packages..."
+          git clone --depth=1 https://github.com/termux/termux-packages
+          
+          cd termux-packages
+          COMMIT=$(git rev-parse --short HEAD)
+          echo "📌 Latest commit: $COMMIT"
+          
+          # Show what UV version Termux has
+          UV_VERSION=$(grep "^TERMUX_PKG_VERSION=" packages/uv/build.sh | cut -d'=' -f2 | tr -d '"')
+          echo "📦 Termux UV version: $UV_VERSION"
+          
+          # Check if sys-info patch exists
+          if [ -f "packages/uv/0001-sys-info-replace-index-with-strchr.diff" ]; then
+            echo "✅ sys-info patch present"
+          else
+            echo "⚠️  sys-info patch not found"
+          fi
+          
+          cd ..
+          echo "✅ termux-packages refreshed"
+          
+      - name: Cache termux-packages
+        if: steps.refresh.outputs.termux == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: termux-packages
+          key: termux-packages-${{ github.run_id }}
+          
+      # Refresh Cargo cache
+      - name: Setup Rust
+        if: steps.refresh.outputs.cargo == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        
+      - name: Refresh Cargo cache
+        if: steps.refresh.outputs.cargo == 'true'
+        run: |
+          echo "🦀 Updating Cargo registry..."
+          cargo search --limit 0 || true
+          
+          if [ -d ~/.cargo/registry ]; then
+            REG_SIZE=$(du -sh ~/.cargo/registry | cut -f1)
+            echo "✅ Cargo registry cached ($REG_SIZE)"
+          fi
+          
+      - name: Cache Cargo registry
+        if: steps.refresh.outputs.cargo == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-registry-${{ runner.os }}-${{ github.run_id }}
+          
+      # Summary
+      - name: Cache refresh summary
+        run: |
+          echo "## 🎉 Cache Refresh Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Refreshed at: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.refresh.outputs.docker }}" = "true" ]; then
+            echo "✅ **Docker image** - termux/package-builder:latest" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ "${{ steps.refresh.outputs.termux }}" = "true" ]; then
+            echo "✅ **termux-packages** - Latest from master branch" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ "${{ steps.refresh.outputs.cargo }}" = "true" ]; then
+            echo "✅ **Cargo registry** - Updated index and cache" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📅 Next scheduled refresh: $(date -d '+3 days' -u '+%Y-%m-%d %H:%M UTC' 2>/dev/null || date -v+3d -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "💡 **Tip**: You can manually trigger this workflow anytime from the Actions tab!" >> $GITHUB_STEP_SUMMARY
