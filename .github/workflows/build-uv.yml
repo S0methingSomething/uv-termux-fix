@@ -47,7 +47,7 @@ jobs:
           
           docker run --rm -v $(pwd):/work termux/package-builder:latest bash -c "
             set -e
-            cd /root/termux-packages
+            cd /home/builder/termux-packages
             
             # Update UV version
             sed -i 's/TERMUX_PKG_VERSION=.*/TERMUX_PKG_VERSION=\"'$VERSION'\"/' packages/uv/build.sh
