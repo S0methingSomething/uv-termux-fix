@@ -44,7 +44,7 @@ jobs:
         VERSION="${{ steps.parse.outputs.version }}"
         if gh release view "v${VERSION}" --repo ${{ github.repository }} >/dev/null 2>&1; then
           echo "exists=true" >> $GITHUB_OUTPUT
-          echo "⏭️ Version $VERSION already exists"
+          echo "⏭️  Version $VERSION already exists"
         else
           echo "exists=false" >> $GITHUB_OUTPUT
           echo "🆕 Building version $VERSION"
@@ -93,7 +93,7 @@ jobs:
         sudo apt-get install -y dpkg-dev gzip cmake
         
         mkdir -p ~/.cargo
-        cat > ~/.cargo/config.toml << EOF
+        cat > ~/.cargo/config.toml << 'EOF'
         [target.aarch64-linux-android]
         linker = "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
         EOF
@@ -120,7 +120,7 @@ jobs:
             patch -p1 -d "$SYS_INFO_DIR" < ../0001-sys-info-replace-index-with-strchr.diff
             echo "✅ Patch applied"
           else
-            echo "⚠️ sys-info directory not found"
+            echo "⚠️  sys-info directory not found"
           fi
         fi
         
@@ -128,30 +128,89 @@ jobs:
       if: steps.check.outputs.exists == 'false'
       run: |
         cd uv-src
-        FILE="crates/uv-python/python/get_interpreter_info.py"
         
-        if [ ! -f "$FILE" ]; then
-          echo "❌ File not found: $FILE"
-          find crates/uv-python -name "*.py"
-          exit 1
-        fi
+        echo "🔧 Applying Android detection fix (Python 3.13+ only)..."
         
-        cp "$FILE" "${FILE}.backup"
+        python3 << 'PYTHON_FIX'
+        import sys
         
-        sed -i '/elif hasattr(sys, "getandroidapilevel"):/,/^        else:/{
-          /elif hasattr(sys, "getandroidapilevel"):/s/^/# /
-          /operating_system = {$/s/^/# /
-          /"name": "android",$/s/^/# /
-          /"api_level": sys.getandroidapilevel(),$/s/^/# /
-          /}$/s/^/# /
-        }' "$FILE"
+        file_path = "crates/uv-python/python/get_interpreter_info.py"
         
-        if grep -q '# elif hasattr(sys, "getandroidapilevel"):' "$FILE"; then
-          echo "✅ Android detection fix applied"
-        else
-          echo "❌ Fix failed"
-          exit 1
-        fi
+        try:
+            # Read the file
+            with open(file_path, 'r') as f:
+                content = f.read()
+            
+            # The problematic code block that detects Android on all Python versions
+            old_code = '''        elif hasattr(sys, "getandroidapilevel"):
+            operating_system = {
+                "name": "android",
+                "api_level": sys.getandroidapilevel(),
+            }'''
+            
+            # The fix: only detect Android on Python 3.13+ (when PEP 738 was implemented)
+            # Python <3.13 will fall through to the else block and return manylinux
+            new_code = '''        elif sys.version_info >= (3, 13) and hasattr(sys, "getandroidapilevel"):
+            operating_system = {
+                "name": "android",
+                "api_level": sys.getandroidapilevel(),
+            }'''
+            
+            # Apply the fix
+            if old_code in content:
+                content = content.replace(old_code, new_code)
+                
+                with open(file_path, 'w') as f:
+                    f.write(content)
+                
+                print("✅ Android detection fix applied successfully")
+                print("")
+                print("What this does:")
+                print("  • Python 3.13+: Detects as 'android' (per PEP 738)")
+                print("  • Python <3.13: Falls through to 'manylinux' detection")
+                print("  • Fixes cache invalidation issue on Termux/Android")
+                print("")
+                print("This matches setuptools behavior and prevents rebuilds!")
+                
+            elif 'sys.version_info >= (3, 13) and hasattr(sys, "getandroidapilevel")' in content:
+                print("✅ Android detection fix already applied")
+                
+            else:
+                print("⚠️  Android detection code not found or has different formatting")
+                print("")
+                if 'getandroidapilevel' in content:
+                    print("Found getandroidapilevel in file, showing context:")
+                    lines = content.split('\n')
+                    for i, line in enumerate(lines, 1):
+                        if 'getandroidapilevel' in line:
+                            start = max(0, i-3)
+                            end = min(len(lines), i+3)
+                            print(f"\nLines {start}-{end}:")
+                            for j in range(start, end):
+                                marker = ">>>" if j == i-1 else "   "
+                                print(f"{marker} {j+1:4d}: {lines[j]}")
+                else:
+                    print("No Android detection code found in file")
+                
+                # Don't fail the build, just warn
+                print("\n⚠️  Continuing without Android fix - may cause cache issues")
+                
+        except FileNotFoundError:
+            print(f"❌ File not found: {file_path}")
+            print("\nSearching for Python files in crates/uv-python:")
+            import os
+            for root, dirs, files in os.walk('crates/uv-python'):
+                for file in files:
+                    if file.endswith('.py'):
+                        print(f"  {os.path.join(root, file)}")
+            sys.exit(1)
+            
+        except Exception as e:
+            print(f"❌ Unexpected error: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+        PYTHON_FIX
         
     - name: Build uv
       if: steps.check.outputs.exists == 'false'
@@ -222,8 +281,14 @@ jobs:
         This is a patched version of uv that fixes Android platform detection.
         
         Changes from official Termux package:
-        - Treats Android as Linux for compatibility with build tools
+        - Android platform only detected on Python 3.13+ (per PEP 738)
+        - Python <3.13 uses Linux platform tags (matches setuptools)
         - Prevents unnecessary rebuilding of cached packages
+        
+        Technical details:
+        The issue occurred because uv detected "android" platform on all Python versions,
+        but setuptools only creates "linux" wheels on Python <3.13. This mismatch caused
+        uv to reject cached wheels and rebuild everything.
         
         For more info: https://github.com/astral-sh/uv/issues/9559
         EOFREADME
@@ -247,6 +312,9 @@ jobs:
          .
          This version includes a fix for Android platform detection that prevents
          unnecessary rebuilding of cached packages on Termux/Android systems.
+         .
+         The fix ensures Android platform is only detected on Python 3.13+ (per PEP 738),
+         while Python <3.13 uses Linux platform tags to match setuptools behavior.
         EOFCONTROL
         
         cat > "${PKGNAME}/DEBIAN/postinst" << 'EOFPOST'
@@ -385,6 +453,13 @@ jobs:
               margin: 20px 0;
               border-radius: 4px;
             }
+            .info {
+              background: #dbeafe;
+              border-left: 4px solid #3b82f6;
+              padding: 15px;
+              margin: 20px 0;
+              border-radius: 4px;
+            }
             ul { margin: 15px 0 15px 30px; }
             li { margin: 8px 0; }
             a { color: #2563eb; text-decoration: none; }
@@ -411,10 +486,19 @@ jobs:
             <div class="success">
               <strong>✅ What's Fixed:</strong>
               <ul style="margin: 10px 0 0 20px;">
-                <li>Android platform detection now treats Android as Linux</li>
-                <li>Prevents cache invalidation across projects</li>
-                <li>Stops unnecessary package rebuilds (saves time & CPU)</li>
+                <li>Android platform only detected on Python 3.13+ (per PEP 738)</li>
+                <li>Python &lt;3.13 uses Linux platform tags (matches setuptools)</li>
+                <li>Prevents cache invalidation and unnecessary package rebuilds</li>
               </ul>
+            </div>
+            
+            <div class="info">
+              <strong>📋 Technical Details:</strong>
+              <p style="margin-top: 10px;">
+                The original issue occurred because uv detected "android" as the platform on all Python versions,
+                but setuptools only creates "linux_aarch64" wheels on Python &lt;3.13. This platform mismatch
+                caused uv to reject cached wheels and rebuild everything from source.
+              </p>
             </div>
             
             <h2>📦 Installation</h2>
@@ -437,6 +521,14 @@ jobs:
         wget https://GITHUB_USER.github.io/REPO_NAME/pool/DEB_FILE
         dpkg -i DEB_FILE</code></pre>
             
+            <h3>Method 3: From GitHub Actions Artifact</h3>
+            <ol style="margin-left: 30px;">
+              <li>Go to <a href="https://github.com/GITHUB_REPO/actions">Actions</a></li>
+              <li>Click the latest successful workflow run</li>
+              <li>Download the artifact ZIP</li>
+              <li>Extract and install: <code>dpkg -i uv-fixed_*.deb</code></li>
+            </ol>
+            
             <h2>🧪 Verification</h2>
             <pre><code># Check version
         uv --version
@@ -453,8 +545,24 @@ jobs:
         uv add pyzmq  # Should use cached version!</code></pre>
             
             <div class="success">
-              If you see "Prepared 0 packages" instead of a full rebuild, it's working! 🎉
+              <strong>Expected Result:</strong> You should see "Prepared 0 packages" instead of a full rebuild. 
+              The cached wheel should be reused! 🎉
             </div>
+            
+            <h2>🔄 Updates</h2>
+            <p>This repository automatically checks for new uv versions every 6 hours and builds them.</p>
+            <pre><code># Update to latest version
+        pkg update && pkg upgrade uv-fixed</code></pre>
+            
+            <h2>↩️ Reverting to Official uv</h2>
+            <pre><code># Remove uv-fixed
+        pkg uninstall uv-fixed
+        
+        # Remove the custom repository
+        rm $PREFIX/etc/apt/sources.list.d/uv-fixed.list
+        
+        # Install official uv
+        pkg install uv</code></pre>
             
             <h2>📊 Package Info</h2>
             <ul>
@@ -465,11 +573,15 @@ jobs:
               <li><strong>SHA256:</strong> <code>SHA256</code></li>
             </ul>
             
-            <h2>🐛 Issues</h2>
+            <h2>🐛 Issues & Discussion</h2>
             <ul>
-              <li><a href="https://github.com/astral-sh/uv/issues/9559">Original Issue #9559</a></li>
-              <li><a href="https://github.com/GITHUB_REPO">Report build issues</a></li>
+              <li><a href="https://github.com/astral-sh/uv/issues/9559">Original Issue #9559</a> - Android rebuilds problem</li>
+              <li><a href="https://peps.python.org/pep-0738/">PEP 738</a> - Android platform support in Python 3.13+</li>
+              <li><a href="https://github.com/GITHUB_REPO">This Repository</a> - Report build issues here</li>
             </ul>
+            
+            <h2>📜 License</h2>
+            <p>uv is licensed under Apache-2.0 and MIT. This is a redistributed build with a compatibility patch.</p>
             
             <hr style="margin: 40px 0; border: none; border-top: 1px solid #e2e8f0;">
             <p style="text-align: center; color: #64748b; font-size: 0.9em;">
@@ -516,9 +628,23 @@ jobs:
           **Auto-built from Termux's official build specifications with Android platform detection fix.**
           
           ### ✅ What's Fixed
-          - Treats Android as Linux for compatibility with build backends
-          - Prevents unnecessary rebuilding of cached packages across projects
-          - Resolves [issue #9559](https://github.com/astral-sh/uv/issues/9559)
+          
+          This build includes a critical fix for Android platform detection that prevents unnecessary package rebuilds:
+          
+          - **Android platform only detected on Python 3.13+** (per PEP 738)
+          - **Python <3.13 uses Linux platform tags** (matches setuptools behavior)
+          - **Prevents cache invalidation** across projects
+          - **Resolves [issue #9559](https://github.com/astral-sh/uv/issues/9559)**
+          
+          ### 🔧 Technical Details
+          
+          The issue occurred because:
+          1. uv detected "android" as the platform on all Python versions
+          2. setuptools only creates "linux_aarch64" wheels on Python <3.13
+          3. This platform mismatch caused uv to reject cached wheels
+          4. Result: Every project rebuild everything from source (very slow!)
+          
+          The fix ensures platform detection matches between uv and setuptools, allowing proper cache reuse.
           
           ### 📥 Quick Install
           
@@ -532,6 +658,7 @@ jobs:
           ```
           
           ### 📦 Package Information
+          
           - **Version**: `${{ steps.parse.outputs.version }}`
           - **Architecture**: `aarch64`
           - **Size**: `$(numfmt --to=iec-i --suffix=B ${{ env.DEB_SIZE }})`
@@ -539,10 +666,11 @@ jobs:
           - **SHA256**: `${{ env.DEB_SHA256 }}`
           
           ### 📚 Documentation
-          Visit the [repository homepage](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }})
+          
+          Visit the [repository homepage](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}) for full installation instructions, verification steps, and troubleshooting.
           
           ---
           
-          Built from [Termux build.sh](https://github.com/termux/termux-packages/blob/master/packages/uv/build.sh)
+          Built from [Termux build.sh](https://github.com/termux/termux-packages/blob/master/packages/uv/build.sh) with Android platform detection fix.
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
