@@ -43,35 +43,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      # Cache 1: Docker image (saves ~2 minutes)
-      - name: Cache Docker image
+      # ----------------------------------------------------------------
+      # CACHE 1: DOCKER IMAGE (CONSUMER MODE)
+      # We look for the cache created by the "Refresh" workflow
+      # ----------------------------------------------------------------
+      - name: Restore Docker image cache
         id: docker-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: /tmp/docker-save
-          key: termux-builder-image-v1
+          # We use a unique key for this run to avoid save errors...
+          key: termux-builder-image-build-${{ github.run_id }}
+          # ...but we RESTORE from the generic prefix created by the Refresh workflow
+          restore-keys: |
+            termux-builder-image-
           
-      - name: Load cached Docker image
-        if: steps.docker-cache.outputs.cache-hit == 'true'
+      - name: Load or Pull Docker image
         run: |
-          echo "📦 Loading Docker image from cache..."
-          docker load -i /tmp/docker-save/termux-builder.tar
-          echo "✅ Loaded from cache (saved ~2 minutes)"
-          
-      - name: Pull and save Docker image
-        if: steps.docker-cache.outputs.cache-hit != 'true'
-        run: |
-          echo "📥 Pulling Docker image (first time or cache expired)..."
-          docker pull termux/package-builder:latest
-          mkdir -p /tmp/docker-save
-          echo "💾 Saving to cache for next time..."
-          docker save termux/package-builder:latest -o /tmp/docker-save/termux-builder.tar
-          echo "✅ Docker image cached"
+          if [ "${{ steps.docker-cache.outputs.cache-hit }}" == "true" ]; then
+            echo "📦 Cache hit! Loading Docker image..."
+            docker load -i /tmp/docker-save/termux-builder.tar
+            echo "✅ Image loaded from cache"
+          else
+            echo "⚠️ Cache miss. Pulling from Docker Hub..."
+            docker pull termux/package-builder:latest
+          fi
       
-      # Cache 2: termux-packages repo (saves ~30 seconds)
-      - name: Cache termux-packages repo
+      # ----------------------------------------------------------------
+      # CACHE 2: TERMUX PACKAGES (CONSUMER MODE)
+      # ----------------------------------------------------------------
+      - name: Restore termux-packages repo
         id: termux-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: termux-packages
           key: termux-packages-build-${{ github.run_id }}
@@ -91,15 +94,17 @@ jobs:
             git clone --depth=1 https://github.com/termux/termux-packages
           fi
       
-      # Cache 3: Cargo registry (saves time on dependencies)
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
+      # ----------------------------------------------------------------
+      # CACHE 3: CARGO REGISTRY (CONSUMER MODE)
+      # ----------------------------------------------------------------
+      - name: Restore Cargo registry
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: cargo-registry-build-${{ needs.check-version.outputs.uv_version }}
+          key: cargo-registry-build-${{ github.run_id }}
           restore-keys: |
             cargo-registry-
       
@@ -229,40 +234,6 @@ jobs:
             - **Python 3.13+**: Returns `android` platform tags (per PEP 738)
             - **Result**: Prevents unnecessary package rebuilds and enables proper cache reuse
             
-            ### Technical Details
-            
-            **The Problem:**
-            - UV detected `android` platform on all Python versions
-            - Setuptools creates `linux_aarch64` wheels on Python <3.13
-            - Platform mismatch → UV rejected cached wheels → rebuilt everything
-            
-            **The Solution:**
-            - Python <3.13: Use `manylinux` tags (compatible with setuptools)
-            - Python 3.13+: Use `android` tags (official support via PEP 738)
-            - Result: Platform tags match → cache reuse works! 🎉
-            
-            ## 🧪 Verification
-            
-            Test that cache reuse works properly:
-            
-            ```bash
-            # Set cache location
-            export UV_CACHE_DIR=$PREFIX/tmp/uv-cache
-            mkdir -p $PREFIX/tmp/uv-cache
-            
-            # First project - builds from source
-            mkdir ~/test1 && cd ~/test1
-            uv init
-            time uv add pyzmq==25.1.1  # Takes ~2-5 minutes
-            
-            # Second project - should use cache!
-            cd ~ && mkdir ~/test2 && cd ~/test2
-            uv init
-            time uv add pyzmq==25.1.1  # Should be instant!
-            ```
-            
-            **Expected Result:** Second project shows "Prepared 0 packages" and completes in seconds! ✅
-            
             ## 📦 Package Info
             
             - **Version**: ${{ needs.check-version.outputs.uv_version }}
@@ -271,12 +242,6 @@ jobs:
               - Termux sys-info compatibility fix
               - Android platform detection fix (Python <3.13)
             
-            ## 🔗 Links
-            
-            - [Original Issue #9559](https://github.com/astral-sh/uv/issues/9559)
-            - [PEP 738 - Android Platform](https://peps.python.org/pep-0738/)
-            - [UV Documentation](https://docs.astral.sh/uv/)
-            - [Report Issues](https://github.com/${{ github.repository }}/issues)
           files: debs/**/*.deb
           draft: false
           prerelease: false
