@@ -24,17 +24,22 @@ jobs:
         # Get build.sh
         wget -q https://raw.githubusercontent.com/termux/termux-packages/master/packages/uv/build.sh
         
-        # Get all patches
-        wget -q https://raw.githubusercontent.com/termux/termux-packages/master/packages/uv/0001-sys-info-replace-index-with-strchr.diff || echo "No patches found"
+        # Get all patches (continue even if not found)
+        wget -q https://raw.githubusercontent.com/termux/termux-packages/master/packages/uv/0001-sys-info-replace-index-with-strchr.diff || true
         
         echo "✅ Fetched build files"
         
     - name: Parse build.sh
       id: parse
       run: |
-        VERSION=$(grep "^TERMUX_PKG_VERSION=" build.sh | cut -d'"' -f2)
-        SRCURL=$(grep "^TERMUX_PKG_SRCURL=" build.sh | sed 's/TERMUX_PKG_SRCURL=//' | sed 's/\${TERMUX_PKG_VERSION}/'"$VERSION"'/g')
-        SHA256=$(grep "^TERMUX_PKG_SHA256=" build.sh | cut -d'=' -f2)
+        # Extract version
+        VERSION=$(grep "^TERMUX_PKG_VERSION=" build.sh | cut -d'=' -f2 | tr -d '"')
+        
+        # Extract source URL and expand VERSION variable
+        SRCURL=$(grep "^TERMUX_PKG_SRCURL=" build.sh | cut -d'=' -f2 | tr -d '"' | sed "s/\${TERMUX_PKG_VERSION}/${VERSION}/g")
+        
+        # Extract SHA256
+        SHA256=$(grep "^TERMUX_PKG_SHA256=" build.sh | cut -d'=' -f2 | tr -d '"')
         
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "srcurl=$SRCURL" >> $GITHUB_OUTPUT
@@ -47,7 +52,7 @@ jobs:
     - name: Check if already built
       id: check
       run: |
-        VERSION=${{ steps.parse.outputs.version }}
+        VERSION="${{ steps.parse.outputs.version }}"
         
         # Check if release exists
         if gh release view "v${VERSION}" --repo ${{ github.repository }} >/dev/null 2>&1; then
@@ -63,9 +68,9 @@ jobs:
     - name: Download and verify source
       if: steps.check.outputs.exists == 'false'
       run: |
-        VERSION=${{ steps.parse.outputs.version }}
-        SRCURL=${{ steps.parse.outputs.srcurl }}
-        EXPECTED_SHA256=${{ steps.parse.outputs.sha256 }}
+        VERSION="${{ steps.parse.outputs.version }}"
+        SRCURL="${{ steps.parse.outputs.srcurl }}"
+        EXPECTED_SHA256="${{ steps.parse.outputs.sha256 }}"
         
         echo "📥 Downloading $SRCURL"
         wget -q --show-progress "$SRCURL" -O source.tar.gz
@@ -85,7 +90,7 @@ jobs:
         
         # Extract
         tar xzf source.tar.gz
-        mv uv-${VERSION} uv-src
+        mv "uv-${VERSION}" uv-src
         
     - name: Setup Rust
       if: steps.check.outputs.exists == 'false'
@@ -108,9 +113,9 @@ jobs:
         
         # Setup Cargo config
         mkdir -p ~/.cargo
-        cat >> ~/.cargo/config.toml << EOF
+        cat >> ~/.cargo/config.toml << 'EOF'
         [target.aarch64-linux-android]
-        linker = "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${{ env.ANDROID_API }}-clang"
+        linker = "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
         
         [build]
         jobs = $(nproc)
@@ -118,27 +123,35 @@ jobs:
         
         # Create dummy CMake toolchain (Termux workaround)
         touch android.toolchain.cmake
-        export TARGET_CMAKE_TOOLCHAIN_FILE="$(pwd)/android.toolchain.cmake"
-        echo "TARGET_CMAKE_TOOLCHAIN_FILE=$TARGET_CMAKE_TOOLCHAIN_FILE" >> $GITHUB_ENV
+        echo "TARGET_CMAKE_TOOLCHAIN_FILE=$(pwd)/android.toolchain.cmake" >> $GITHUB_ENV
         
     - name: Fetch dependencies and apply Termux patches
       if: steps.check.outputs.exists == 'false'
       run: |
         cd uv-src
-        export CARGO_HOME=$HOME/.cargo
+        export CARGO_HOME="$HOME/.cargo"
         
         # Clean any existing sys-info (like Termux does)
-        rm -rf "${CARGO_HOME}"/registry/src/*/sys-info-*
+        rm -rf "${CARGO_HOME}"/registry/src/*/sys-info-* || true
         
         echo "📦 Fetching Cargo dependencies..."
         cargo fetch --target aarch64-linux-android
         
-        # Apply Termux's sys-info patch
+        # Apply Termux's sys-info patch if it exists
         if [ -f ../0001-sys-info-replace-index-with-strchr.diff ]; then
           echo "🔧 Applying Termux sys-info patch..."
-          patch -p1 -d "${CARGO_HOME}"/registry/src/*/sys-info-* \
-            < ../0001-sys-info-replace-index-with-strchr.diff
-          echo "✅ Patch applied"
+          
+          # Find the sys-info directory
+          SYS_INFO_DIR=$(find "${CARGO_HOME}/registry/src" -type d -name "sys-info-*" | head -n1)
+          
+          if [ -n "$SYS_INFO_DIR" ] && [ -d "$SYS_INFO_DIR" ]; then
+            patch -p1 -d "$SYS_INFO_DIR" < ../0001-sys-info-replace-index-with-strchr.diff
+            echo "✅ Patch applied to $SYS_INFO_DIR"
+          else
+            echo "⚠️  sys-info directory not found, skipping patch"
+          fi
+        else
+          echo "ℹ️  No Termux patch found, continuing without it"
         fi
         
     - name: Apply Android detection fix
@@ -150,18 +163,34 @@ jobs:
         
         FILE="crates/uv-python/python/get_interpreter_info.py"
         
+        # Check if file exists
+        if [ ! -f "$FILE" ]; then
+          echo "❌ File not found: $FILE"
+          echo "Available files:"
+          find crates/uv-python -name "*.py" || true
+          exit 1
+        fi
+        
         # Backup
         cp "$FILE" "${FILE}.backup"
         
-        # Comment out Android detection (lines with getandroidapilevel)
-        sed -i '/elif hasattr(sys, "getandroidapilevel"):/,/^        else:/s/^        \(elif\|operating_system\|"name"\|"api_level"\|}\)/        # \1/' "$FILE"
+        # Comment out the Android detection block
+        sed -i '/elif hasattr(sys, "getandroidapilevel"):/,/^        else:/{
+          /elif hasattr(sys, "getandroidapilevel"):/s/^/# /
+          /operating_system = {$/s/^/# /
+          /"name": "android",$/s/^/# /
+          /"api_level": sys.getandroidapilevel(),$/s/^/# /
+          /}$/s/^/# /
+        }' "$FILE"
         
-        # Verify
-        if grep -q "# elif hasattr(sys, \"getandroidapilevel\"):" "$FILE"; then
+        # Verify the change
+        if grep -q '# elif hasattr(sys, "getandroidapilevel"):' "$FILE"; then
           echo "✅ Android detection fix applied"
+          echo "Changes:"
+          diff -u "${FILE}.backup" "$FILE" || true
         else
-          echo "❌ Fix failed"
-          diff -u "${FILE}.backup" "$FILE"
+          echo "❌ Fix may have failed, showing file content:"
+          grep -A 5 -B 2 "getandroidapilevel" "$FILE" || echo "Pattern not found in file"
           exit 1
         fi
         
@@ -202,40 +231,40 @@ jobs:
           fi
           
           SIZE=$(stat -c%s "$bin")
-          echo "✅ $bin: $(numfmt --to=iec-i --suffix=B $SIZE)"
+          echo "✅ $bin: $(numfmt --to=iec-i --suffix=B "$SIZE")"
         done
         
     - name: Create .deb package
       if: steps.check.outputs.exists == 'false'
       run: |
-        VERSION=${{ steps.parse.outputs.version }}
+        VERSION="${{ steps.parse.outputs.version }}"
         PKGNAME="uv-fixed"
         
         echo "📦 Creating .deb package..."
         
         # Create package structure (following Termux paths exactly)
-        mkdir -p ${PKGNAME}${TERMUX_PREFIX}/bin
-        mkdir -p ${PKGNAME}${TERMUX_PREFIX}/share/bash-completion/completions
-        mkdir -p ${PKGNAME}${TERMUX_PREFIX}/share/elvish/lib
-        mkdir -p ${PKGNAME}${TERMUX_PREFIX}/share/fish/vendor_completions.d
-        mkdir -p ${PKGNAME}${TERMUX_PREFIX}/share/zsh/site-functions
-        mkdir -p ${PKGNAME}${TERMUX_PREFIX}/share/doc/${PKGNAME}
-        mkdir -p ${PKGNAME}/DEBIAN
+        mkdir -p "${PKGNAME}${TERMUX_PREFIX}/bin"
+        mkdir -p "${PKGNAME}${TERMUX_PREFIX}/share/bash-completion/completions"
+        mkdir -p "${PKGNAME}${TERMUX_PREFIX}/share/elvish/lib"
+        mkdir -p "${PKGNAME}${TERMUX_PREFIX}/share/fish/vendor_completions.d"
+        mkdir -p "${PKGNAME}${TERMUX_PREFIX}/share/zsh/site-functions"
+        mkdir -p "${PKGNAME}${TERMUX_PREFIX}/share/doc/${PKGNAME}"
+        mkdir -p "${PKGNAME}/DEBIAN"
         
         # Install binaries (using Termux's install method: -Dm700)
         install -Dm700 uv-src/target/aarch64-linux-android/release/uv \
-          ${PKGNAME}${TERMUX_PREFIX}/bin/uv
+          "${PKGNAME}${TERMUX_PREFIX}/bin/uv"
         install -Dm700 uv-src/target/aarch64-linux-android/release/uvx \
-          ${PKGNAME}${TERMUX_PREFIX}/bin/uvx
+          "${PKGNAME}${TERMUX_PREFIX}/bin/uvx"
         
         # Create placeholder files for completions (filled by postinst)
-        touch ${PKGNAME}${TERMUX_PREFIX}/share/bash-completion/completions/uv
-        touch ${PKGNAME}${TERMUX_PREFIX}/share/elvish/lib/uv.elv
-        touch ${PKGNAME}${TERMUX_PREFIX}/share/fish/vendor_completions.d/uv.fish
-        touch ${PKGNAME}${TERMUX_PREFIX}/share/zsh/site-functions/_uv
+        touch "${PKGNAME}${TERMUX_PREFIX}/share/bash-completion/completions/uv"
+        touch "${PKGNAME}${TERMUX_PREFIX}/share/elvish/lib/uv.elv"
+        touch "${PKGNAME}${TERMUX_PREFIX}/share/fish/vendor_completions.d/uv.fish"
+        touch "${PKGNAME}${TERMUX_PREFIX}/share/zsh/site-functions/_uv"
         
         # Create README
-        cat > ${PKGNAME}${TERMUX_PREFIX}/share/doc/${PKGNAME}/README << EOF
+        cat > "${PKGNAME}${TERMUX_PREFIX}/share/doc/${PKGNAME}/README" << 'EOFREADME'
         uv-fixed for Termux
         ===================
         
@@ -246,11 +275,11 @@ jobs:
         - Prevents unnecessary rebuilding of cached packages
         
         For more info: https://github.com/astral-sh/uv/issues/9559
-        EOF
+        EOFREADME
         
         # Create control file
-        INSTALLED_SIZE=$(du -sk ${PKGNAME} | cut -f1)
-        cat > ${PKGNAME}/DEBIAN/control << EOF
+        INSTALLED_SIZE=$(du -sk "${PKGNAME}" | cut -f1)
+        cat > "${PKGNAME}/DEBIAN/control" << EOFCONTROL
         Package: uv-fixed
         Version: ${VERSION}
         Architecture: aarch64
@@ -268,10 +297,10 @@ jobs:
          .
          This version includes a fix for Android platform detection that prevents
          unnecessary rebuilding of cached packages on Termux/Android systems.
-        EOF
+        EOFCONTROL
         
         # Create postinst (exactly like Termux)
-        cat > ${PKGNAME}/DEBIAN/postinst << 'EOFPOST'
+        cat > "${PKGNAME}/DEBIAN/postinst" << 'EOFPOST'
         #!/data/data/com.termux/files/usr/bin/sh
         
         uv generate-shell-completion bash > "/data/data/com.termux/files/usr/share/bash-completion/completions/uv"
@@ -279,23 +308,27 @@ jobs:
         uv generate-shell-completion fish > "/data/data/com.termux/files/usr/share/fish/vendor_completions.d/uv.fish"
         uv generate-shell-completion zsh > "/data/data/com.termux/files/usr/share/zsh/site-functions/_uv"
         EOFPOST
-        chmod 755 ${PKGNAME}/DEBIAN/postinst
+        chmod 755 "${PKGNAME}/DEBIAN/postinst"
         
         # Build .deb
-        dpkg-deb --build --root-owner-group ${PKGNAME}
+        dpkg-deb --build --root-owner-group "${PKGNAME}"
         
         DEB_FILE="uv-fixed_${VERSION}_aarch64.deb"
-        mv ${PKGNAME}.deb ${DEB_FILE}
+        mv "${PKGNAME}.deb" "${DEB_FILE}"
         
         # Verify
-        dpkg-deb --info ${DEB_FILE}
+        dpkg-deb --info "${DEB_FILE}"
         
         # Store info
+        DEB_SIZE=$(stat -c%s "${DEB_FILE}")
+        DEB_MD5=$(md5sum "${DEB_FILE}" | cut -d' ' -f1)
+        DEB_SHA256=$(sha256sum "${DEB_FILE}" | cut -d' ' -f1)
+        
         echo "DEB_FILE=${DEB_FILE}" >> $GITHUB_ENV
         echo "DEB_VERSION=${VERSION}" >> $GITHUB_ENV
-        echo "DEB_SIZE=$(stat -c%s ${DEB_FILE})" >> $GITHUB_ENV
-        echo "DEB_MD5=$(md5sum ${DEB_FILE} | cut -d' ' -f1)" >> $GITHUB_ENV
-        echo "DEB_SHA256=$(sha256sum ${DEB_FILE} | cut -d' ' -f1)" >> $GITHUB_ENV
+        echo "DEB_SIZE=${DEB_SIZE}" >> $GITHUB_ENV
+        echo "DEB_MD5=${DEB_MD5}" >> $GITHUB_ENV
+        echo "DEB_SHA256=${DEB_SHA256}" >> $GITHUB_ENV
         
         echo "✅ Created ${DEB_FILE}"
         
@@ -310,7 +343,11 @@ jobs:
     - name: Create APT repository
       if: steps.check.outputs.exists == 'false'
       run: |
-        VERSION=${{ steps.parse.outputs.version }}
+        VERSION="${{ steps.parse.outputs.version }}"
+        DEB_FILE="${{ env.DEB_FILE }}"
+        DEB_SIZE="${{ env.DEB_SIZE }}"
+        DEB_MD5="${{ env.DEB_MD5 }}"
+        DEB_SHA256="${{ env.DEB_SHA256 }}"
         
         echo "📚 Creating APT repository structure..."
         
@@ -319,7 +356,7 @@ jobs:
         mkdir -p repo/pool
         
         # Copy .deb
-        cp ${DEB_FILE} repo/pool/
+        cp "${DEB_FILE}" repo/pool/
         
         # Generate Packages file
         cd repo
@@ -327,7 +364,7 @@ jobs:
         gzip -9c dists/termux/main/binary-aarch64/Packages > dists/termux/main/binary-aarch64/Packages.gz
         
         # Create Release file with checksums
-        cat > dists/termux/Release << EOF
+        cat > dists/termux/Release << 'EOFRELEASE'
         Origin: uv-fixed
         Label: uv-fixed  
         Suite: termux
@@ -336,7 +373,7 @@ jobs:
         Architectures: aarch64
         Components: main
         Description: Fixed uv package for Termux
-        EOF
+        EOFRELEASE
         
         # Add checksums
         cd dists/termux
@@ -348,7 +385,7 @@ jobs:
         cd ../../..
         
         # Create user-friendly index.html
-        cat > repo/index.html << 'HTMLEOF'
+        cat > repo/index.html << 'EOFHTML'
         <!DOCTYPE html>
         <html lang="en">
         <head>
@@ -456,21 +493,21 @@ jobs:
             
             <h3>Method 1: APT Repository (Recommended)</h3>
             <pre><code># Add the repository
-echo "deb https://GITHUB_USER.github.io/REPO_NAME termux main" | tee $PREFIX/etc/apt/sources.list.d/uv-fixed.list
-
-# Update package list
-pkg update
-
-# Install uv-fixed (will replace regular uv if installed)
-pkg install uv-fixed</code></pre>
+        echo "deb https://GITHUB_USER.github.io/REPO_NAME termux main" | tee $PREFIX/etc/apt/sources.list.d/uv-fixed.list
+        
+        # Update package list
+        pkg update
+        
+        # Install uv-fixed (will replace regular uv if installed)
+        pkg install uv-fixed</code></pre>
             
             <h3>Method 2: Direct .deb Install</h3>
             <pre><code># Download the .deb
-cd ~/downloads
-wget https://GITHUB_USER.github.io/REPO_NAME/pool/DEB_FILE
-
-# Install it
-dpkg -i DEB_FILE</code></pre>
+        cd ~/downloads
+        wget https://GITHUB_USER.github.io/REPO_NAME/pool/DEB_FILE
+        
+        # Install it
+        dpkg -i DEB_FILE</code></pre>
             
             <h3>Method 3: From GitHub Actions Artifact</h3>
             <ol style="margin-left: 30px;">
@@ -482,19 +519,19 @@ dpkg -i DEB_FILE</code></pre>
             
             <h2>🧪 Verification</h2>
             <pre><code># Check version
-uv --version
-
-# Test that it doesn't rebuild unnecessarily
-mkdir ~/test-uv && cd ~/test-uv
-uv init test-project-1
-cd test-project-1
-uv add pyzmq
-
-cd ..
-uv init test-project-2
-cd test-project-2
-uv add pyzmq  # Should NOT rebuild pyzmq from source!
-              # Should use cached version</code></pre>
+        uv --version
+        
+        # Test that it doesn't rebuild unnecessarily
+        mkdir ~/test-uv && cd ~/test-uv
+        uv init test-project-1
+        cd test-project-1
+        uv add pyzmq
+        
+        cd ..
+        uv init test-project-2
+        cd test-project-2
+        uv add pyzmq  # Should NOT rebuild pyzmq from source!
+                      # Should use cached version</code></pre>
             
             <div class="success">
               If you see "Prepared 0 packages" instead of a full rebuild, it's working! 🎉
@@ -503,18 +540,18 @@ uv add pyzmq  # Should NOT rebuild pyzmq from source!
             <h2>🔄 Updates</h2>
             <p>This repository automatically checks for new uv versions every 6 hours and builds them.</p>
             <pre><code># Update to latest version
-pkg update
-pkg upgrade uv-fixed</code></pre>
+        pkg update
+        pkg upgrade uv-fixed</code></pre>
             
             <h2>↩️ Reverting to Official uv</h2>
             <pre><code># Remove uv-fixed
-pkg uninstall uv-fixed
-
-# Remove the custom repository
-rm $PREFIX/etc/apt/sources.list.d/uv-fixed.list
-
-# Install official uv
-pkg install uv</code></pre>
+        pkg uninstall uv-fixed
+        
+        # Remove the custom repository
+        rm $PREFIX/etc/apt/sources.list.d/uv-fixed.list
+        
+        # Install official uv
+        pkg install uv</code></pre>
             
             <h2>📊 Package Info</h2>
             <ul>
@@ -542,12 +579,12 @@ pkg install uv</code></pre>
           </div>
         </body>
         </html>
-        HTMLEOF
+        EOFHTML
         
         # Replace placeholders
         sed -i "s/VERSION/${VERSION}/g" repo/index.html
         sed -i "s/VVERSION/v${VERSION}/g" repo/index.html
-        sed -i "s/SIZE/$(numfmt --to=iec-i --suffix=B ${DEB_SIZE})/g" repo/index.html
+        sed -i "s/SIZE/$(numfmt --to=iec-i --suffix=B "${DEB_SIZE}")/g" repo/index.html
         sed -i "s/MD5/${DEB_MD5}/g" repo/index.html
         sed -i "s/SHA256/${DEB_SHA256}/g" repo/index.html
         sed -i "s/DEB_FILE/${DEB_FILE}/g" repo/index.html
@@ -560,7 +597,7 @@ pkg install uv</code></pre>
         
     - name: Deploy to GitHub Pages
       if: steps.check.outputs.exists == 'false'
-      uses: peaceiris/actions-gh-pages@v3
+      uses: peaceiris/actions-gh-pages@v4
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         publish_dir: ./repo
@@ -569,7 +606,7 @@ pkg install uv</code></pre>
         
     - name: Create GitHub Release
       if: steps.check.outputs.exists == 'false'
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         tag_name: v${{ steps.parse.outputs.version }}
         name: uv ${{ steps.parse.outputs.version }} for Termux
@@ -609,4 +646,4 @@ pkg install uv</code></pre>
           
           Built from [Termux build.sh](https://github.com/termux/termux-packages/blob/master/packages/uv/build.sh)
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
