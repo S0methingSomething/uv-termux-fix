@@ -1,0 +1,612 @@
+name: Build uv-fixed for Termux
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'  # Every 6 hours, check for updates
+
+env:
+  TERMUX_PREFIX: /data/data/com.termux/files/usr
+  TERMUX_ARCH: aarch64
+  ANDROID_API: 24
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout (for README/docs)
+      uses: actions/checkout@v4
+      
+    - name: Fetch Termux build.sh and patches
+      run: |
+        echo "📥 Fetching Termux build files..."
+        
+        # Get build.sh
+        wget -q https://raw.githubusercontent.com/termux/termux-packages/master/packages/uv/build.sh
+        
+        # Get all patches
+        wget -q https://raw.githubusercontent.com/termux/termux-packages/master/packages/uv/0001-sys-info-replace-index-with-strchr.diff || echo "No patches found"
+        
+        echo "✅ Fetched build files"
+        
+    - name: Parse build.sh
+      id: parse
+      run: |
+        VERSION=$(grep "^TERMUX_PKG_VERSION=" build.sh | cut -d'"' -f2)
+        SRCURL=$(grep "^TERMUX_PKG_SRCURL=" build.sh | sed 's/TERMUX_PKG_SRCURL=//' | sed 's/\${TERMUX_PKG_VERSION}/'"$VERSION"'/g')
+        SHA256=$(grep "^TERMUX_PKG_SHA256=" build.sh | cut -d'=' -f2)
+        
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "srcurl=$SRCURL" >> $GITHUB_OUTPUT
+        echo "sha256=$SHA256" >> $GITHUB_OUTPUT
+        
+        echo "📦 Version: $VERSION"
+        echo "🔗 Source: $SRCURL"
+        echo "🔐 SHA256: $SHA256"
+        
+    - name: Check if already built
+      id: check
+      run: |
+        VERSION=${{ steps.parse.outputs.version }}
+        
+        # Check if release exists
+        if gh release view "v${VERSION}" --repo ${{ github.repository }} >/dev/null 2>&1; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+          echo "⏭️  Version $VERSION already exists, skipping build"
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+          echo "🆕 Building new version $VERSION"
+        fi
+      env:
+        GH_TOKEN: ${{ github.token }}
+        
+    - name: Download and verify source
+      if: steps.check.outputs.exists == 'false'
+      run: |
+        VERSION=${{ steps.parse.outputs.version }}
+        SRCURL=${{ steps.parse.outputs.srcurl }}
+        EXPECTED_SHA256=${{ steps.parse.outputs.sha256 }}
+        
+        echo "📥 Downloading $SRCURL"
+        wget -q --show-progress "$SRCURL" -O source.tar.gz
+        
+        # Verify checksum
+        echo "🔐 Verifying checksum..."
+        ACTUAL_SHA256=$(sha256sum source.tar.gz | cut -d' ' -f1)
+        
+        if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
+          echo "❌ Checksum mismatch!"
+          echo "Expected: $EXPECTED_SHA256"
+          echo "Got: $ACTUAL_SHA256"
+          exit 1
+        fi
+        
+        echo "✅ Checksum verified"
+        
+        # Extract
+        tar xzf source.tar.gz
+        mv uv-${VERSION} uv-src
+        
+    - name: Setup Rust
+      if: steps.check.outputs.exists == 'false'
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: aarch64-linux-android
+        
+    - name: Setup Android NDK
+      if: steps.check.outputs.exists == 'false'
+      uses: nttld/setup-ndk@v1
+      with:
+        ndk-version: r26b
+        
+    - name: Setup build environment
+      if: steps.check.outputs.exists == 'false'
+      run: |
+        # Install dependencies
+        sudo apt-get update
+        sudo apt-get install -y dpkg-dev gzip cmake
+        
+        # Setup Cargo config
+        mkdir -p ~/.cargo
+        cat >> ~/.cargo/config.toml << EOF
+        [target.aarch64-linux-android]
+        linker = "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${{ env.ANDROID_API }}-clang"
+        
+        [build]
+        jobs = $(nproc)
+        EOF
+        
+        # Create dummy CMake toolchain (Termux workaround)
+        touch android.toolchain.cmake
+        export TARGET_CMAKE_TOOLCHAIN_FILE="$(pwd)/android.toolchain.cmake"
+        echo "TARGET_CMAKE_TOOLCHAIN_FILE=$TARGET_CMAKE_TOOLCHAIN_FILE" >> $GITHUB_ENV
+        
+    - name: Fetch dependencies and apply Termux patches
+      if: steps.check.outputs.exists == 'false'
+      run: |
+        cd uv-src
+        export CARGO_HOME=$HOME/.cargo
+        
+        # Clean any existing sys-info (like Termux does)
+        rm -rf "${CARGO_HOME}"/registry/src/*/sys-info-*
+        
+        echo "📦 Fetching Cargo dependencies..."
+        cargo fetch --target aarch64-linux-android
+        
+        # Apply Termux's sys-info patch
+        if [ -f ../0001-sys-info-replace-index-with-strchr.diff ]; then
+          echo "🔧 Applying Termux sys-info patch..."
+          patch -p1 -d "${CARGO_HOME}"/registry/src/*/sys-info-* \
+            < ../0001-sys-info-replace-index-with-strchr.diff
+          echo "✅ Patch applied"
+        fi
+        
+    - name: Apply Android detection fix
+      if: steps.check.outputs.exists == 'false'
+      run: |
+        cd uv-src
+        
+        echo "🔧 Applying Android detection fix..."
+        
+        FILE="crates/uv-python/python/get_interpreter_info.py"
+        
+        # Backup
+        cp "$FILE" "${FILE}.backup"
+        
+        # Comment out Android detection (lines with getandroidapilevel)
+        sed -i '/elif hasattr(sys, "getandroidapilevel"):/,/^        else:/s/^        \(elif\|operating_system\|"name"\|"api_level"\|}\)/        # \1/' "$FILE"
+        
+        # Verify
+        if grep -q "# elif hasattr(sys, \"getandroidapilevel\"):" "$FILE"; then
+          echo "✅ Android detection fix applied"
+        else
+          echo "❌ Fix failed"
+          diff -u "${FILE}.backup" "$FILE"
+          exit 1
+        fi
+        
+    - name: Build uv (following Termux steps)
+      if: steps.check.outputs.exists == 'false'
+      run: |
+        cd uv-src
+        
+        echo "🔨 Building uv for aarch64-linux-android..."
+        
+        # Use Termux's exact build flags
+        PKG_CONFIG_ALL_DYNAMIC=1 \
+        ZSTD_SYS_USE_PKG_CONFIG=1 \
+        cargo build \
+          --jobs $(nproc) \
+          --target aarch64-linux-android \
+          --release
+        
+        echo "✅ Build complete"
+        
+    - name: Verify binaries
+      if: steps.check.outputs.exists == 'false'
+      run: |
+        cd uv-src/target/aarch64-linux-android/release
+        
+        # Check binaries exist
+        for bin in uv uvx; do
+          if [ ! -f "$bin" ]; then
+            echo "❌ $bin not found"
+            exit 1
+          fi
+          
+          # Verify architecture
+          if ! file "$bin" | grep -q "aarch64"; then
+            echo "❌ $bin is not aarch64"
+            file "$bin"
+            exit 1
+          fi
+          
+          SIZE=$(stat -c%s "$bin")
+          echo "✅ $bin: $(numfmt --to=iec-i --suffix=B $SIZE)"
+        done
+        
+    - name: Create .deb package
+      if: steps.check.outputs.exists == 'false'
+      run: |
+        VERSION=${{ steps.parse.outputs.version }}
+        PKGNAME="uv-fixed"
+        
+        echo "📦 Creating .deb package..."
+        
+        # Create package structure (following Termux paths exactly)
+        mkdir -p ${PKGNAME}${TERMUX_PREFIX}/bin
+        mkdir -p ${PKGNAME}${TERMUX_PREFIX}/share/bash-completion/completions
+        mkdir -p ${PKGNAME}${TERMUX_PREFIX}/share/elvish/lib
+        mkdir -p ${PKGNAME}${TERMUX_PREFIX}/share/fish/vendor_completions.d
+        mkdir -p ${PKGNAME}${TERMUX_PREFIX}/share/zsh/site-functions
+        mkdir -p ${PKGNAME}${TERMUX_PREFIX}/share/doc/${PKGNAME}
+        mkdir -p ${PKGNAME}/DEBIAN
+        
+        # Install binaries (using Termux's install method: -Dm700)
+        install -Dm700 uv-src/target/aarch64-linux-android/release/uv \
+          ${PKGNAME}${TERMUX_PREFIX}/bin/uv
+        install -Dm700 uv-src/target/aarch64-linux-android/release/uvx \
+          ${PKGNAME}${TERMUX_PREFIX}/bin/uvx
+        
+        # Create placeholder files for completions (filled by postinst)
+        touch ${PKGNAME}${TERMUX_PREFIX}/share/bash-completion/completions/uv
+        touch ${PKGNAME}${TERMUX_PREFIX}/share/elvish/lib/uv.elv
+        touch ${PKGNAME}${TERMUX_PREFIX}/share/fish/vendor_completions.d/uv.fish
+        touch ${PKGNAME}${TERMUX_PREFIX}/share/zsh/site-functions/_uv
+        
+        # Create README
+        cat > ${PKGNAME}${TERMUX_PREFIX}/share/doc/${PKGNAME}/README << EOF
+        uv-fixed for Termux
+        ===================
+        
+        This is a patched version of uv that fixes Android platform detection.
+        
+        Changes from official Termux package:
+        - Treats Android as Linux for compatibility with build tools
+        - Prevents unnecessary rebuilding of cached packages
+        
+        For more info: https://github.com/astral-sh/uv/issues/9559
+        EOF
+        
+        # Create control file
+        INSTALLED_SIZE=$(du -sk ${PKGNAME} | cut -f1)
+        cat > ${PKGNAME}/DEBIAN/control << EOF
+        Package: uv-fixed
+        Version: ${VERSION}
+        Architecture: aarch64
+        Maintainer: Auto Build <noreply@github.com>
+        Installed-Size: ${INSTALLED_SIZE}
+        Depends: zstd
+        Conflicts: uv
+        Replaces: uv
+        Provides: uv
+        Section: utils
+        Priority: optional
+        Homepage: https://docs.astral.sh/uv/
+        Description: An extremely fast Python package installer and resolver (Android fix)
+         An extremely fast Python package installer and resolver, written in Rust.
+         .
+         This version includes a fix for Android platform detection that prevents
+         unnecessary rebuilding of cached packages on Termux/Android systems.
+        EOF
+        
+        # Create postinst (exactly like Termux)
+        cat > ${PKGNAME}/DEBIAN/postinst << 'EOFPOST'
+        #!/data/data/com.termux/files/usr/bin/sh
+        
+        uv generate-shell-completion bash > "/data/data/com.termux/files/usr/share/bash-completion/completions/uv"
+        uv generate-shell-completion elvish > "/data/data/com.termux/files/usr/share/elvish/lib/uv.elv"
+        uv generate-shell-completion fish > "/data/data/com.termux/files/usr/share/fish/vendor_completions.d/uv.fish"
+        uv generate-shell-completion zsh > "/data/data/com.termux/files/usr/share/zsh/site-functions/_uv"
+        EOFPOST
+        chmod 755 ${PKGNAME}/DEBIAN/postinst
+        
+        # Build .deb
+        dpkg-deb --build --root-owner-group ${PKGNAME}
+        
+        DEB_FILE="uv-fixed_${VERSION}_aarch64.deb"
+        mv ${PKGNAME}.deb ${DEB_FILE}
+        
+        # Verify
+        dpkg-deb --info ${DEB_FILE}
+        
+        # Store info
+        echo "DEB_FILE=${DEB_FILE}" >> $GITHUB_ENV
+        echo "DEB_VERSION=${VERSION}" >> $GITHUB_ENV
+        echo "DEB_SIZE=$(stat -c%s ${DEB_FILE})" >> $GITHUB_ENV
+        echo "DEB_MD5=$(md5sum ${DEB_FILE} | cut -d' ' -f1)" >> $GITHUB_ENV
+        echo "DEB_SHA256=$(sha256sum ${DEB_FILE} | cut -d' ' -f1)" >> $GITHUB_ENV
+        
+        echo "✅ Created ${DEB_FILE}"
+        
+    - name: Upload .deb as artifact
+      if: steps.check.outputs.exists == 'false'
+      uses: actions/upload-artifact@v4
+      with:
+        name: uv-fixed-${{ steps.parse.outputs.version }}-aarch64
+        path: uv-fixed_*.deb
+        retention-days: 90
+        
+    - name: Create APT repository
+      if: steps.check.outputs.exists == 'false'
+      run: |
+        VERSION=${{ steps.parse.outputs.version }}
+        
+        echo "📚 Creating APT repository structure..."
+        
+        # Create repo structure
+        mkdir -p repo/dists/termux/main/binary-aarch64
+        mkdir -p repo/pool
+        
+        # Copy .deb
+        cp ${DEB_FILE} repo/pool/
+        
+        # Generate Packages file
+        cd repo
+        dpkg-scanpackages --multiversion pool /dev/null > dists/termux/main/binary-aarch64/Packages
+        gzip -9c dists/termux/main/binary-aarch64/Packages > dists/termux/main/binary-aarch64/Packages.gz
+        
+        # Create Release file with checksums
+        cat > dists/termux/Release << EOF
+        Origin: uv-fixed
+        Label: uv-fixed  
+        Suite: termux
+        Codename: termux
+        Date: $(date -R)
+        Architectures: aarch64
+        Components: main
+        Description: Fixed uv package for Termux
+        EOF
+        
+        # Add checksums
+        cd dists/termux
+        echo "MD5Sum:" >> Release
+        find main -type f -exec md5sum {} \; | sed 's|main/| |' | awk '{printf " %s %16d %s\n", $1, $3, $2}' >> Release
+        echo "SHA256:" >> Release  
+        find main -type f -exec sha256sum {} \; | sed 's|main/| |' | awk '{printf " %s %16d %s\n", $1, $3, $2}' >> Release
+        
+        cd ../../..
+        
+        # Create user-friendly index.html
+        cat > repo/index.html << 'HTMLEOF'
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>uv-fixed for Termux</title>
+          <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body {
+              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+              line-height: 1.6;
+              color: #333;
+              max-width: 900px;
+              margin: 0 auto;
+              padding: 20px;
+              background: #f5f5f5;
+            }
+            .container {
+              background: white;
+              padding: 40px;
+              border-radius: 8px;
+              box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }
+            h1 { color: #2563eb; margin-bottom: 10px; }
+            h2 { color: #1e40af; margin-top: 30px; margin-bottom: 15px; }
+            code {
+              background: #f1f5f9;
+              padding: 2px 6px;
+              border-radius: 4px;
+              font-family: 'Courier New', monospace;
+              font-size: 0.9em;
+            }
+            pre {
+              background: #1e293b;
+              color: #e2e8f0;
+              padding: 20px;
+              border-radius: 6px;
+              overflow-x: auto;
+              margin: 15px 0;
+            }
+            pre code {
+              background: none;
+              color: inherit;
+              padding: 0;
+            }
+            .warning {
+              background: #fef3c7;
+              border-left: 4px solid #f59e0b;
+              padding: 15px;
+              margin: 20px 0;
+              border-radius: 4px;
+            }
+            .info {
+              background: #dbeafe;
+              border-left: 4px solid #3b82f6;
+              padding: 15px;
+              margin: 20px 0;
+              border-radius: 4px;
+            }
+            .success {
+              background: #d1fae5;
+              border-left: 4px solid #10b981;
+              padding: 15px;
+              margin: 20px 0;
+              border-radius: 4px;
+            }
+            ul { margin: 15px 0 15px 30px; }
+            li { margin: 8px 0; }
+            a { color: #2563eb; text-decoration: none; }
+            a:hover { text-decoration: underline; }
+            .badge {
+              display: inline-block;
+              padding: 4px 12px;
+              background: #2563eb;
+              color: white;
+              border-radius: 12px;
+              font-size: 0.85em;
+              font-weight: 600;
+              margin-left: 10px;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <h1>🚀 uv-fixed for Termux <span class="badge">VVERSION</span></h1>
+            <p style="color: #64748b; margin-bottom: 30px;">
+              Fixed uv package that prevents unnecessary rebuilds on Android/Termux
+            </p>
+            
+            <div class="success">
+              <strong>✅ What's Fixed:</strong>
+              <ul style="margin: 10px 0 0 20px;">
+                <li>Android platform detection now treats Android as Linux</li>
+                <li>Prevents cache invalidation across projects</li>
+                <li>Stops unnecessary package rebuilds (saves time & CPU)</li>
+              </ul>
+            </div>
+            
+            <h2>📦 Installation</h2>
+            
+            <div class="warning">
+              <strong>⚠️ Note:</strong> This package conflicts with official <code>uv</code>. 
+              It will replace it if you have it installed.
+            </div>
+            
+            <h3>Method 1: APT Repository (Recommended)</h3>
+            <pre><code># Add the repository
+echo "deb https://GITHUB_USER.github.io/REPO_NAME termux main" | tee $PREFIX/etc/apt/sources.list.d/uv-fixed.list
+
+# Update package list
+pkg update
+
+# Install uv-fixed (will replace regular uv if installed)
+pkg install uv-fixed</code></pre>
+            
+            <h3>Method 2: Direct .deb Install</h3>
+            <pre><code># Download the .deb
+cd ~/downloads
+wget https://GITHUB_USER.github.io/REPO_NAME/pool/DEB_FILE
+
+# Install it
+dpkg -i DEB_FILE</code></pre>
+            
+            <h3>Method 3: From GitHub Actions Artifact</h3>
+            <ol style="margin-left: 30px;">
+              <li>Go to <a href="https://github.com/GITHUB_REPO/actions">Actions</a></li>
+              <li>Click the latest successful workflow run</li>
+              <li>Download the artifact ZIP</li>
+              <li>Extract and install: <code>dpkg -i uv-fixed_*.deb</code></li>
+            </ol>
+            
+            <h2>🧪 Verification</h2>
+            <pre><code># Check version
+uv --version
+
+# Test that it doesn't rebuild unnecessarily
+mkdir ~/test-uv && cd ~/test-uv
+uv init test-project-1
+cd test-project-1
+uv add pyzmq
+
+cd ..
+uv init test-project-2
+cd test-project-2
+uv add pyzmq  # Should NOT rebuild pyzmq from source!
+              # Should use cached version</code></pre>
+            
+            <div class="success">
+              If you see "Prepared 0 packages" instead of a full rebuild, it's working! 🎉
+            </div>
+            
+            <h2>🔄 Updates</h2>
+            <p>This repository automatically checks for new uv versions every 6 hours and builds them.</p>
+            <pre><code># Update to latest version
+pkg update
+pkg upgrade uv-fixed</code></pre>
+            
+            <h2>↩️ Reverting to Official uv</h2>
+            <pre><code># Remove uv-fixed
+pkg uninstall uv-fixed
+
+# Remove the custom repository
+rm $PREFIX/etc/apt/sources.list.d/uv-fixed.list
+
+# Install official uv
+pkg install uv</code></pre>
+            
+            <h2>📊 Package Info</h2>
+            <ul>
+              <li><strong>Version:</strong> <code>VERSION</code></li>
+              <li><strong>Architecture:</strong> <code>aarch64</code></li>
+              <li><strong>Size:</strong> <code>SIZE</code></li>
+              <li><strong>MD5:</strong> <code>MD5</code></li>
+              <li><strong>SHA256:</strong> <code>SHA256</code></li>
+            </ul>
+            
+            <h2>🐛 Issues</h2>
+            <ul>
+              <li><a href="https://github.com/astral-sh/uv/issues/9559">Original Issue #9559</a> - Android rebuilds problem</li>
+              <li><a href="https://github.com/GITHUB_REPO">This Repository</a> - Report build issues here</li>
+            </ul>
+            
+            <h2>📜 License</h2>
+            <p>uv is licensed under Apache-2.0 and MIT. This is a redistributed build with a compatibility patch.</p>
+            
+            <hr style="margin: 40px 0; border: none; border-top: 1px solid #e2e8f0;">
+            <p style="text-align: center; color: #64748b; font-size: 0.9em;">
+              Auto-built from <a href="https://github.com/termux/termux-packages/blob/master/packages/uv/build.sh">Termux's official build specs</a>
+              <br>Last updated: DATE
+            </p>
+          </div>
+        </body>
+        </html>
+        HTMLEOF
+        
+        # Replace placeholders
+        sed -i "s/VERSION/${VERSION}/g" repo/index.html
+        sed -i "s/VVERSION/v${VERSION}/g" repo/index.html
+        sed -i "s/SIZE/$(numfmt --to=iec-i --suffix=B ${DEB_SIZE})/g" repo/index.html
+        sed -i "s/MD5/${DEB_MD5}/g" repo/index.html
+        sed -i "s/SHA256/${DEB_SHA256}/g" repo/index.html
+        sed -i "s/DEB_FILE/${DEB_FILE}/g" repo/index.html
+        sed -i "s|GITHUB_USER|${{ github.repository_owner }}|g" repo/index.html
+        sed -i "s|REPO_NAME|${{ github.event.repository.name }}|g" repo/index.html
+        sed -i "s|GITHUB_REPO|${{ github.repository }}|g" repo/index.html
+        sed -i "s/DATE/$(date -R)/g" repo/index.html
+        
+        echo "✅ Repository created"
+        
+    - name: Deploy to GitHub Pages
+      if: steps.check.outputs.exists == 'false'
+      uses: peaceiris/actions-gh-pages@v3
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./repo
+        publish_branch: gh-pages
+        force_orphan: true
+        
+    - name: Create GitHub Release
+      if: steps.check.outputs.exists == 'false'
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v${{ steps.parse.outputs.version }}
+        name: uv ${{ steps.parse.outputs.version }} for Termux
+        files: ${{ env.DEB_FILE }}
+        body: |
+          ## 📦 uv ${{ steps.parse.outputs.version }} for Termux (Android Fix)
+          
+          **Auto-built from Termux's official build specifications with Android platform detection fix.**
+          
+          ### ✅ What's Fixed
+          - Treats Android as Linux for compatibility with build backends (setuptools, etc.)
+          - Prevents unnecessary rebuilding of cached packages across projects
+          - Resolves [issue #9559](https://github.com/astral-sh/uv/issues/9559)
+          
+          ### 📥 Quick Install
+          
+          ```bash
+          # Add repository
+          echo "deb https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }} termux main" | \
+            tee $PREFIX/etc/apt/sources.list.d/uv-fixed.list
+          
+          # Install
+          pkg update && pkg install uv-fixed
+          ```
+          
+          ### 📦 Package Information
+          - **Version**: `${{ steps.parse.outputs.version }}`
+          - **Architecture**: `aarch64`
+          - **Size**: `$(numfmt --to=iec-i --suffix=B ${{ env.DEB_SIZE }})`
+          - **MD5**: `${{ env.DEB_MD5 }}`
+          - **SHA256**: `${{ env.DEB_SHA256 }}`
+          
+          ### 📚 Documentation
+          Visit the [repository homepage](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}) for full installation instructions and troubleshooting.
+          
+          ---
+          
+          Built from [Termux build.sh](https://github.com/termux/termux-packages/blob/master/packages/uv/build.sh)
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
