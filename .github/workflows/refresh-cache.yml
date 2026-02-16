@@ -40,7 +40,9 @@ jobs:
             echo "🔄 Refreshing $CACHE_TYPE cache only"
           fi
       
-      # Refresh Docker cache
+      # ----------------------------------------------------------------
+      # REFRESH DOCKER CACHE
+      # ----------------------------------------------------------------
       - name: Refresh Docker image cache
         if: steps.refresh.outputs.docker == 'true'
         run: |
@@ -51,6 +53,8 @@ jobs:
           echo "💾 Saving Docker image..."
           docker save termux/package-builder:latest -o /tmp/docker-save/termux-builder.tar
           
+          # Verify file size to ensure it saved correctly
+          ls -lh /tmp/docker-save/termux-builder.tar
           SIZE=$(du -h /tmp/docker-save/termux-builder.tar | cut -f1)
           echo "✅ Docker image cached ($SIZE)"
           
@@ -59,9 +63,12 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: /tmp/docker-save
-          key: termux-builder-image-v1
+          # USE RUN_ID TO MAKE KEY UNIQUE (Fixes "Unable to reserve cache")
+          key: termux-builder-image-${{ github.run_id }}
           
-      # Refresh termux-packages cache
+      # ----------------------------------------------------------------
+      # REFRESH TERMUX-PACKAGES CACHE
+      # ----------------------------------------------------------------
       - name: Refresh termux-packages repo
         if: steps.refresh.outputs.termux == 'true'
         run: |
@@ -91,9 +98,12 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: termux-packages
+          # USE RUN_ID TO MAKE KEY UNIQUE
           key: termux-packages-${{ github.run_id }}
           
-      # Refresh Cargo cache
+      # ----------------------------------------------------------------
+      # REFRESH CARGO CACHE
+      # ----------------------------------------------------------------
       - name: Setup Rust
         if: steps.refresh.outputs.cargo == 'true'
         uses: dtolnay/rust-toolchain@stable
@@ -143,9 +153,12 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
+          # USE RUN_ID TO MAKE KEY UNIQUE
           key: cargo-registry-${{ runner.os }}-${{ github.run_id }}
           
-      # Summary
+      # ----------------------------------------------------------------
+      # SUMMARY
+      # ----------------------------------------------------------------
       - name: Cache refresh summary
         run: |
           echo "## 🎉 Cache Refresh Complete" >> $GITHUB_STEP_SUMMARY
