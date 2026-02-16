@@ -101,12 +101,33 @@ jobs:
       - name: Refresh Cargo cache
         if: steps.refresh.outputs.cargo == 'true'
         run: |
-          echo "🦀 Updating Cargo registry..."
-          cargo search --limit 0 || true
+          echo "🦀 Updating Cargo registry index..."
+          
+          # Create a dummy Cargo project to force index update
+          mkdir -p /tmp/cargo-refresh
+          cd /tmp/cargo-refresh
+          
+          cat > Cargo.toml << 'EOF'
+          [package]
+          name = "refresh"
+          version = "0.1.0"
+          edition = "2021"
+          
+          [dependencies]
+          serde = "1.0"
+          EOF
+          
+          echo "📥 Fetching dependencies (updates registry index)..."
+          cargo fetch --quiet 2>&1 || true
+          
+          cd -
+          rm -rf /tmp/cargo-refresh
           
           if [ -d ~/.cargo/registry ]; then
-            REG_SIZE=$(du -sh ~/.cargo/registry | cut -f1)
+            REG_SIZE=$(du -sh ~/.cargo/registry 2>/dev/null | cut -f1)
             echo "✅ Cargo registry cached ($REG_SIZE)"
+          else
+            echo "⚠️  Cargo registry not initialized"
           fi
           
       - name: Cache Cargo registry
