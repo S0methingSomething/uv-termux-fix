@@ -68,21 +68,26 @@ jobs:
           sed -i "s/TERMUX_PKG_SHA256=.*/TERMUX_PKG_SHA256=SKIP_CHECKSUM/" packages/uv/build.sh
           
           # Remove old patches that don't apply to new versions
-          rm -f packages/uv/*.patch
+          rm -f packages/uv/*.patch packages/uv/*.diff
           
           # Create our platform detection fix patch
           cat > packages/uv/00001-fix-android-platform-detection.patch << 'EOF'
           --- a/crates/uv-python/python/get_interpreter_info.py
           +++ b/crates/uv-python/python/get_interpreter_info.py
-          @@ -470,7 +470,7 @@ def get_operating_system_and_architecture() -> dict:
+          @@ -462,6 +462,13 @@ def get_operating_system_and_architecture() -> dict:
                            "major": glibc_version[0],
                            "minor": glibc_version[1],
                        }
-          -        elif hasattr(sys, "getandroidapilevel"):
-          +        elif hasattr(sys, "getandroidapilevel") and sys.version_info >= (3, 13):
+          +        elif hasattr(sys, "getandroidapilevel") and sys.version_info < (3, 13):
+          +            # Python <3.13 on Android: return manylinux for compatibility with setuptools
+          +            operating_system = {
+          +                "name": "manylinux",
+          +                "major": 2,
+          +                "minor": 17,
+          +            }
+                   elif hasattr(sys, "getandroidapilevel"):
                        operating_system = {
                            "name": "android",
-                           "api_level": sys.getandroidapilevel(),
           EOF
           
           # Build
@@ -121,21 +126,34 @@ jobs:
             
             ```bash
             pkg install wget
-            wget https://github.com/${{ github.repository }}/releases/download/${{ needs.check-version.outputs.uv_version }}/uv_<version>_aarch64.deb
+            wget https://github.com/${{ github.repository }}/releases/download/${{ needs.check-version.outputs.uv_version }}/uv_${{ needs.check-version.outputs.uv_version }}_aarch64.deb
             pkg install ./uv_*.deb
             ```
             
             ## Fix Applied
             - Fixes [issue #9559](https://github.com/astral-sh/uv/issues/9559)
-            - Returns `linux` platform tags on Python <3.13 instead of `android`
+            - Returns `manylinux_2_17` platform tags on Python <3.13 (matches setuptools)
+            - Returns `android` platform tags on Python 3.13+ (per PEP 738)
             - Prevents unnecessary package rebuilds on Termux
             
             ## Verification
             ```bash
-            mkdir test && cd test
+            # Set cache location (avoids file locking issues)
+            export UV_CACHE_DIR=$PREFIX/tmp/uv-cache
+            mkdir -p $PREFIX/tmp/uv-cache
+            
+            # Test cache reuse
+            mkdir test1 && cd test1
             uv init && uv add pyzmq==25.1.1
             cd .. && mkdir test2 && cd test2
-            uv init && uv add pyzmq==25.1.1  # Should use cache
+            uv init && uv add pyzmq==25.1.1  # Should use cache!
+            ```
+            
+            ## Recommended Settings
+            
+            Add to your `~/.bashrc`:
+            ```bash
+            export UV_CACHE_DIR=$PREFIX/tmp/uv-cache
             ```
           files: debs/**/*.deb
           draft: false
