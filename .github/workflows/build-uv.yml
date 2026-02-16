@@ -38,6 +38,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+      - name: Cache Docker image
+        uses: actions/cache@v4
+        with:
+          path: /tmp/docker-cache
+          key: termux-builder-${{ runner.os }}
+          
+      - name: Cache Rust
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+      
       - name: Build UV for aarch64
         run: |
           VERSION="${{ needs.check-version.outputs.uv_version }}"
@@ -50,24 +67,20 @@ jobs:
           sed -i "s/TERMUX_PKG_VERSION=.*/TERMUX_PKG_VERSION=\"$VERSION\"/" packages/uv/build.sh
           sed -i "s/TERMUX_PKG_SHA256=.*/TERMUX_PKG_SHA256=SKIP_CHECKSUM/" packages/uv/build.sh
           
-          # Create patch
-          cat > packages/uv/0002-fix-android-platform-detection.patch << 'EOF'
+          # Create patch (numbered after existing 00002 patch)
+          cat > packages/uv/00003-fix-android-platform-detection.patch << 'EOF'
           --- a/crates/uv-python/python/get_interpreter_info.py
           +++ b/crates/uv-python/python/get_interpreter_info.py
-          @@ -470,7 +470,8 @@ def get_operating_system_and_architecture() -> dict:
+          @@ -470,7 +470,7 @@ def get_operating_system_and_architecture() -> dict:
                            "major": glibc_version[0],
                            "minor": glibc_version[1],
                        }
           -        elif hasattr(sys, "getandroidapilevel"):
-          +        # Only use android tag for Python 3.13+ (PEP 738/783)
           +        elif hasattr(sys, "getandroidapilevel") and sys.version_info >= (3, 13):
                        operating_system = {
                            "name": "android",
                            "api_level": sys.getandroidapilevel(),
           EOF
-          
-          # Patch build.sh
-          sed -i '/touch "${TERMUX_PKG_BUILDDIR}\/android.toolchain.cmake"/a\\t# Fix Android platform detection\n\tpatch -p1 -i "${TERMUX_PKG_BUILDER_DIR}"/0002-fix-android-platform-detection.patch' packages/uv/build.sh
           
           # Build
           ./scripts/run-docker.sh ./build-package.sh -I -a aarch64 uv
