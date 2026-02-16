@@ -49,8 +49,9 @@ jobs:
           VERSION="${{ needs.check-version.outputs.uv_version }}"
           cd termux-packages
           
-          # Update version
+          # Update version and skip checksum
           sed -i "s/TERMUX_PKG_VERSION=.*/TERMUX_PKG_VERSION=\"$VERSION\"/" packages/uv/build.sh
+          sed -i "s/TERMUX_PKG_SHA256=.*/TERMUX_PKG_SHA256=SKIP_CHECKSUM/" packages/uv/build.sh
           
           # Create patch file
           cat > packages/uv/0002-fix-android-platform-detection.patch << 'EOF'
