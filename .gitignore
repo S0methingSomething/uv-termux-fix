@@ -1,0 +1,7 @@
+*.deb
+*.tar.gz
+output/
+debs/
+termux-packages/
+build.sh.orig
+build.sh

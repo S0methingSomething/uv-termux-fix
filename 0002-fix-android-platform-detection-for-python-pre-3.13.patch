@@ -1,0 +1,12 @@
+--- a/crates/uv-python/python/get_interpreter_info.py
++++ b/crates/uv-python/python/get_interpreter_info.py
+@@ -470,7 +470,8 @@ def get_operating_system_and_architecture() -> dict:
+                 "major": glibc_version[0],
+                 "minor": glibc_version[1],
+             }
+-        elif hasattr(sys, "getandroidapilevel"):
++        # Only use android tag for Python 3.13+ (PEP 738/783)
++        elif hasattr(sys, "getandroidapilevel") and sys.version_info >= (3, 13):
+             operating_system = {
+                 "name": "android",
+                 "api_level": sys.getandroidapilevel(),

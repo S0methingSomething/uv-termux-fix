@@ -1,0 +1,137 @@
+name: Build UV for Termux
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      uv_version: ${{ steps.check.outputs.uv_version }}
+    steps:
+      - name: Get latest UV version
+        id: uv_latest
+        run: |
+          UV_VERSION=$(curl -s https://api.github.com/repos/astral-sh/uv/releases/latest | jq -r .tag_name)
+          echo "version=$UV_VERSION" >> $GITHUB_OUTPUT
+      
+      - name: Check if already built
+        id: check
+        run: |
+          LATEST_RELEASE=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/latest | jq -r .tag_name 2>/dev/null || echo "none")
+          if [ "$LATEST_RELEASE" != "${{ steps.uv_latest.outputs.version }}" ]; then
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "uv_version=${{ steps.uv_latest.outputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [aarch64, arm, x86_64, i686]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Build with Termux Docker
+        run: |
+          VERSION="${{ needs.check-version.outputs.uv_version }}"
+          
+          docker run --rm -v $(pwd):/work termux/package-builder:latest bash -c "
+            set -e
+            cd /root/termux-packages
+            
+            # Update UV version
+            sed -i 's/TERMUX_PKG_VERSION=.*/TERMUX_PKG_VERSION=\"'$VERSION'\"/' packages/uv/build.sh
+            
+            # Create patch
+            cat > packages/uv/0002-fix-android-platform-detection.patch << 'PATCH'
+          --- a/crates/uv-python/python/get_interpreter_info.py
+          +++ b/crates/uv-python/python/get_interpreter_info.py
+          @@ -470,7 +470,8 @@ def get_operating_system_and_architecture() -> dict:
+                           \"major\": glibc_version[0],
+                           \"minor\": glibc_version[1],
+                       }
+          -        elif hasattr(sys, \"getandroidapilevel\"):
+          +        # Only use android tag for Python 3.13+ (PEP 738/783)
+          +        elif hasattr(sys, \"getandroidapilevel\") and sys.version_info >= (3, 13):
+                       operating_system = {
+                           \"name\": \"android\",
+                           \"api_level\": sys.getandroidapilevel(),
+          PATCH
+            
+            # Patch build.sh to apply fix
+            sed -i '/touch \"\${TERMUX_PKG_BUILDDIR}\/android.toolchain.cmake\"/a\\n\t# Fix Android platform detection for Python <3.13 (issue #9559)\n\tpatch -p1 -i \"\${TERMUX_PKG_BUILDER_DIR}\"/0002-fix-android-platform-detection.patch' packages/uv/build.sh
+            
+            # Build
+            ./build-package.sh -a ${{ matrix.arch }} uv
+            
+            # Copy output
+            mkdir -p /work/output
+            cp output/*.deb /work/output/
+          "
+          
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: uv-${{ matrix.arch }}
+          path: output/*.deb
+
+  release:
+    needs: [check-version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: debs
+          
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.check-version.outputs.uv_version }}
+          name: UV ${{ needs.check-version.outputs.uv_version }} for Termux
+          body: |
+            UV ${{ needs.check-version.outputs.uv_version }} built for Termux with Android platform detection fix.
+            
+            ## Installation
+            
+            Download the appropriate .deb for your architecture:
+            - `aarch64` - 64-bit ARM (most modern Android devices)
+            - `arm` - 32-bit ARM (older devices)
+            - `x86_64` - 64-bit x86 (emulators)
+            - `i686` - 32-bit x86 (older emulators)
+            
+            ```bash
+            pkg install wget
+            wget https://github.com/${{ github.repository }}/releases/download/${{ needs.check-version.outputs.uv_version }}/uv_<version>_<arch>.deb
+            pkg install ./uv_*.deb
+            ```
+            
+            ## Fix Applied
+            - Fixes [issue #9559](https://github.com/astral-sh/uv/issues/9559)
+            - Returns `linux` platform tags on Python <3.13 instead of `android`
+            - Prevents unnecessary package rebuilds on Termux
+            
+            ## Verification
+            ```bash
+            mkdir test && cd test
+            uv init && uv add pyzmq==25.1.1
+            cd .. && mkdir test2 && cd test2
+            uv init && uv add pyzmq==25.1.1  # Should use cache
+            ```
+          files: debs/**/*.deb
+          draft: false
+          prerelease: false
