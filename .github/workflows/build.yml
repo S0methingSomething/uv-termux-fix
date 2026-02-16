@@ -1,4 +1,4 @@
-name: Build uv-fixed for Termux
+name: Build uv-fixed for Termux. 
 
 on:
   workflow_dispatch:
