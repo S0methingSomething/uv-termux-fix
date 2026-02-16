@@ -117,6 +117,10 @@ jobs:
           serde = "1.0"
           EOF
           
+          # FIX: Create the source file so cargo can parse the manifest
+          mkdir src
+          touch src/lib.rs
+
           echo "📥 Fetching dependencies (updates registry index)..."
           cargo fetch --quiet 2>&1 || true
           
@@ -128,6 +132,7 @@ jobs:
             echo "✅ Cargo registry cached ($REG_SIZE)"
           else
             echo "⚠️  Cargo registry not initialized"
+            exit 1
           fi
           
       - name: Cache Cargo registry
