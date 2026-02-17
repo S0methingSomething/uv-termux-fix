@@ -127,8 +127,11 @@ jobs:
               echo "⚠️  Sys-info patch not found (may not be needed for this version)"
           fi
           
-          # Copy ported fs2 patch for UV 0.10.3+
-          echo "📥 Copying ported fs2 file locking patch..."
+          # Remove Termux's old fs2 patch and use our ported version
+          echo "🗑️  Removing Termux's old fs2 patch..."
+          rm -f packages/uv/00002-revert-to-shared-lock.patch
+          
+          echo "📥 Copying our ported fs2 file locking patch..."
           cp ../patches/uv-0.10.3-android-fs2.patch packages/uv/00002-android-fs2-ported.patch
           
           # Copy Android platform detection fix patch
