@@ -138,23 +138,6 @@ jobs:
           echo "🔧 Copying Android platform detection fix patch..."
           cp ../patches/0002-fix-android-platform-detection-for-python-pre-3.13.patch packages/uv/0003-fix-android-platform-detection.patch
           
-          # Add our patch application to build.sh
-          echo "🔧 Modifying build.sh to apply our patch..."
-          cat >> packages/uv/build.sh << 'EOFBUILD'
-          
-          termux_step_post_get_source() {
-              # Apply Android platform detection fix
-              if [ -f "${TERMUX_PKG_BUILDER_DIR}/0003-fix-android-platform-detection.patch" ]; then
-                  echo "Applying Android platform detection fix..."
-                  patch -p1 -d "${TERMUX_PKG_SRCDIR}" \
-                    -i "${TERMUX_PKG_BUILDER_DIR}/0003-fix-android-platform-detection.patch" || {
-                      echo "Warning: Could not apply Android platform detection patch"
-                      echo "This may be due to upstream changes. Build will continue."
-                  }
-              fi
-          }
-          EOFBUILD
-          
           echo "📋 Build configuration:"
           echo "  UV Version: $VERSION"
           echo "  Patches: sys-info fix + fs2 file locking + Android platform detection fix"
