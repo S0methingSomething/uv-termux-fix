@@ -1,7 +1,7 @@
-diff --git a/Cargo.lock b/Cargo.lock
+diff --git Cargo.lock Cargo.lock
 index 33371786f..2209f4bcc 100644
---- a/Cargo.lock
-+++ b/Cargo.lock
+--- Cargo.lock
++++ Cargo.lock
 @@ -920,7 +920,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
  dependencies = [
@@ -60,7 +60,7 @@ index 33371786f..2209f4bcc 100644
   "portable-atomic-util",
   "serde_core",
 - "windows-sys 0.52.0",
-+ "windows-sys 0.59.0",
++ "windows-sys 0.61.0",
  ]
  
  [[package]]
@@ -108,10 +108,10 @@ index 33371786f..2209f4bcc 100644
  ]
  
  [[package]]
-diff --git a/Cargo.toml b/Cargo.toml
+diff --git Cargo.toml Cargo.toml
 index c91089932..7f7b20c62 100644
---- a/Cargo.toml
-+++ b/Cargo.toml
+--- Cargo.toml
++++ Cargo.toml
 @@ -117,6 +117,7 @@ etcetera = { version = "0.11.0" }
  fastrand = { version = "2.3.0" }
  flate2 = { version = "1.0.33", default-features = false, features = ["zlib-rs"] }
@@ -120,10 +120,10 @@ index c91089932..7f7b20c62 100644
  futures = { version = "0.3.30" }
  glob = { version = "0.3.1" }
  globset = { version = "0.4.15" }
-diff --git a/crates/uv-fs/Cargo.toml b/crates/uv-fs/Cargo.toml
+diff --git crates/uv-fs/Cargo.toml crates/uv-fs/Cargo.toml
 index 7e107fba7..aaf9df1b5 100644
---- a/crates/uv-fs/Cargo.toml
-+++ b/crates/uv-fs/Cargo.toml
+--- crates/uv-fs/Cargo.toml
++++ crates/uv-fs/Cargo.toml
 @@ -22,6 +22,7 @@ dunce = { workspace = true }
  either = { workspace = true }
  encoding_rs_io = { workspace = true }
@@ -132,10 +132,10 @@ index 7e107fba7..aaf9df1b5 100644
  path-slash = { workspace = true }
  percent-encoding = { workspace = true }
  same-file = { workspace = true }
-diff --git a/crates/uv-fs/src/lib.rs b/crates/uv-fs/src/lib.rs
+diff --git crates/uv-fs/src/lib.rs crates/uv-fs/src/lib.rs
 index 28297b68b..b45d2a2ae 100644
---- a/crates/uv-fs/src/lib.rs
-+++ b/crates/uv-fs/src/lib.rs
+--- crates/uv-fs/src/lib.rs
++++ crates/uv-fs/src/lib.rs
 @@ -636,17 +636,17 @@ pub fn is_virtualenv_base(path: impl AsRef<Path>) -> bool {
  }
  
@@ -164,10 +164,10 @@ index 28297b68b..b45d2a2ae 100644
  }
  
  /// An asynchronous reader that reports progress as bytes are read.
-diff --git a/crates/uv-fs/src/locked_file.rs b/crates/uv-fs/src/locked_file.rs
+diff --git crates/uv-fs/src/locked_file.rs crates/uv-fs/src/locked_file.rs
 index dfcd70e14..4683625c5 100644
---- a/crates/uv-fs/src/locked_file.rs
-+++ b/crates/uv-fs/src/locked_file.rs
+--- crates/uv-fs/src/locked_file.rs
++++ crates/uv-fs/src/locked_file.rs
 @@ -5,6 +5,7 @@ use std::sync::LazyLock;
  use std::time::Duration;
  use std::{env, io};
