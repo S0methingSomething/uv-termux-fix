@@ -183,23 +183,23 @@ jobs:
           fi
 
           # Write to a file to avoid shell escaping issues
-          cat > /tmp/release-body.md <<INNEREOF
-> **This is a modified build of UV for Termux.** It includes a patch that forces \`manylinux_2_17\` platform tags instead of \`android\`, fixing cache mismatches that cause endless package rebuilds ([#9559](https://github.com/astral-sh/uv/issues/9559)).
-
-## Installation
-
-\`\`\`bash
-pkg install wget
-wget https://github.com/${{ github.repository }}/releases/download/${VERSION}/uv_${VERSION}_aarch64.deb
-pkg install ./uv_*.deb
-\`\`\`
-
----
-
-## Upstream Changelog
-
-${BODY}
-INNEREOF
+          {
+            echo '> **This is a modified build of UV for Termux.** It includes a patch that forces `manylinux_2_17` platform tags instead of `android`, fixing cache mismatches that cause endless package rebuilds ([#9559](https://github.com/astral-sh/uv/issues/9559)).'
+            echo ''
+            echo '## Installation'
+            echo ''
+            echo '```bash'
+            echo 'pkg install wget'
+            echo "wget https://github.com/${{ github.repository }}/releases/download/${VERSION}/uv_${VERSION}_aarch64.deb"
+            echo 'pkg install ./uv_*.deb'
+            echo '```'
+            echo ''
+            echo '---'
+            echo ''
+            echo '## Upstream Changelog'
+            echo ''
+            echo "$BODY"
+          } > /tmp/release-body.md
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
