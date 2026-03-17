@@ -6,7 +6,7 @@ Automated builds of [UV](https://github.com/astral-sh/uv) for Termux with a patc
 
 UV rebuilds cached packages on every command in Termux due to a platform tag mismatch (issue [#9559](https://github.com/astral-sh/uv/issues/9559)). Build backends like setuptools and maturin produce `manylinux` wheels, but UV on Android expects `android`-tagged wheels, so cached packages are never reused.
 
-On Python 3.13+, the problem is worse: `sys.getandroidapilevel()` returns the NDK API level baked into the Python build (e.g. 24), while build backends use the device's actual API level (e.g. 36), producing wheels that UV rejects as incompatible.
+On Python 3.13+, PEP 738/783 formalized `android` platform tags, but they remain impractical on Termux — almost no PyPI packages publish android wheels, and the API level reported by `sys.getandroidapilevel()` can easily mismatch what build backends use, causing further compatibility issues.
 
 ## Solution
 
