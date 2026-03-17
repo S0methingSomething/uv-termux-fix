@@ -5,7 +5,7 @@ on:
     - cron: '0 0 * * *'
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches: [main]
 
 jobs:
   check-version:
@@ -127,20 +127,13 @@ jobs:
               echo "⚠️  Sys-info patch not found (may not be needed for this version)"
           fi
           
-          # Remove Termux's old fs2 patch and use our ported version
-          echo "🗑️  Removing Termux's old fs2 patch..."
-          rm -f packages/uv/00002-revert-to-shared-lock.patch
-          
-          echo "📥 Copying our ported fs2 file locking patch..."
-          cp ../patches/uv-0.10.3-android-fs2.patch packages/uv/00002-android-fs2-ported.patch
-          
-          # Copy Android platform detection fix patch
-          echo "🔧 Copying Android platform detection fix patch..."
-          cp ../patches/0002-fix-android-platform-detection-for-python-pre-3.13.patch packages/uv/0003-fix-android-platform-detection.patch
+          # Copy our manylinux platform tag patch
+          echo "🔧 Copying manylinux platform tag patch..."
+          cp ../patches/0001-always-use-manylinux-tags-on-android-termux.patch packages/uv/0002-always-use-manylinux-tags-on-android-termux.patch
           
           echo "📋 Build configuration:"
           echo "  UV Version: $VERSION"
-          echo "  Patches: sys-info fix + fs2 file locking + Android platform detection fix"
+          echo "  Patches: sys-info fix + manylinux platform tags"
           echo ""
           
           echo "🚀 Starting build..."
@@ -174,47 +167,46 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: debs
-          
+
+      - name: Fetch upstream changelog
+        id: changelog
+        run: |
+          VERSION="${{ needs.check-version.outputs.uv_version }}"
+          echo "Fetching changelog for UV $VERSION..."
+
+          BODY=$(curl -sfL \
+            "https://api.github.com/repos/astral-sh/uv/releases/tags/$VERSION" \
+            | jq -r '.body // empty')
+
+          if [ -z "$BODY" ]; then
+            BODY="*Could not fetch upstream changelog. See [astral-sh/uv releases](https://github.com/astral-sh/uv/releases/tag/$VERSION).*"
+          fi
+
+          # Write to a file to avoid shell escaping issues
+          cat > /tmp/release-body.md <<INNEREOF
+> **This is a modified build of UV for Termux.** It includes a patch that forces \`manylinux_2_17\` platform tags instead of \`android\`, fixing cache mismatches that cause endless package rebuilds ([#9559](https://github.com/astral-sh/uv/issues/9559)).
+
+## Installation
+
+\`\`\`bash
+pkg install wget
+wget https://github.com/${{ github.repository }}/releases/download/${VERSION}/uv_${VERSION}_aarch64.deb
+pkg install ./uv_*.deb
+\`\`\`
+
+---
+
+## Upstream Changelog
+
+${BODY}
+INNEREOF
+
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.check-version.outputs.uv_version }}
-          name: UV ${{ needs.check-version.outputs.uv_version }} for Termux
-          body: |
-            UV ${{ needs.check-version.outputs.uv_version }} built for Termux with Android platform detection fix.
-            
-            ## 🚀 Installation
-            
-            ### Quick Install
-            ```bash
-            pkg install wget
-            wget https://github.com/${{ github.repository }}/releases/download/${{ needs.check-version.outputs.uv_version }}/uv_${{ needs.check-version.outputs.uv_version }}_aarch64.deb
-            pkg install ./uv_*.deb
-            ```
-            
-            ### Recommended Setup
-            Add to your `~/.bashrc` to avoid file locking issues:
-            ```bash
-            export UV_CACHE_DIR=$PREFIX/tmp/uv-cache
-            mkdir -p $PREFIX/tmp/uv-cache
-            ```
-            
-            ## ✅ What's Fixed
-            
-            This build includes a critical fix for [issue #9559](https://github.com/astral-sh/uv/issues/9559):
-            
-            - **Python <3.13**: Returns `manylinux_2_17` platform tags (matches setuptools behavior)
-            - **Python 3.13+**: Returns `android` platform tags (per PEP 738)
-            - **Result**: Prevents unnecessary package rebuilds and enables proper cache reuse
-            
-            ## 📦 Package Info
-            
-            - **Version**: ${{ needs.check-version.outputs.uv_version }}
-            - **Architecture**: aarch64 (64-bit ARM)
-            - **Patches Applied**: 
-              - Termux sys-info compatibility fix
-              - Android platform detection fix (Python <3.13)
-            
+          name: UV ${{ needs.check-version.outputs.uv_version }} for Termux (modified)
+          body_path: /tmp/release-body.md
           files: debs/**/*.deb
           draft: false
           prerelease: false

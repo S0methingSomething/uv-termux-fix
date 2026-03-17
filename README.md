@@ -1,61 +1,64 @@
 # UV for Termux - Fixed Build
 
-Automated builds of [UV](https://github.com/astral-sh/uv) for Termux with the Android platform detection fix for Python <3.13.
+Automated builds of [UV](https://github.com/astral-sh/uv) for Termux with a patch that forces `manylinux` platform tags on Android, fixing cache mismatches that cause endless package rebuilds.
 
 ## Problem
 
-UV rebuilds cached packages on every command in Termux due to platform tag mismatch (issue [#9559](https://github.com/astral-sh/uv/issues/9559)).
+UV rebuilds cached packages on every command in Termux due to a platform tag mismatch (issue [#9559](https://github.com/astral-sh/uv/issues/9559)). Build backends like setuptools and maturin produce `manylinux` wheels, but UV on Android expects `android`-tagged wheels, so cached packages are never reused.
+
+On Python 3.13+, the problem is worse: `sys.getandroidapilevel()` returns the NDK API level baked into the Python build (e.g. 24), while build backends use the device's actual API level (e.g. 36), producing wheels that UV rejects as incompatible.
 
 ## Solution
 
-This repository automatically builds UV with a patch that returns `linux` platform tags on Python <3.13 instead of `android`, matching what build backends like setuptools produce.
+This repository automatically builds UV with a patch that always returns `manylinux_2_17` platform tags instead of `android`, matching what build backends actually produce on Termux.
 
 ## Installation
 
-### From Releases
-
 ```bash
-# Determine your architecture
-uname -m  # aarch64, armv7l, x86_64, or i686
-
-# Download and install (replace VERSION and ARCH)
+# Download and install (aarch64 only)
 pkg install wget
-wget https://github.com/YOUR_USERNAME/uv-termux-fix/releases/latest/download/uv_VERSION_ARCH.deb
+wget https://github.com/S0methingSomething/uv-termux-fix/releases/latest/download/uv_VERSION_aarch64.deb
 pkg install ./uv_*.deb
 ```
 
-### As Package Source
-
-Add this repository as a package source:
-
-```bash
-# Create sources list
-echo "deb [trusted=yes] https://github.com/YOUR_USERNAME/uv-termux-fix/releases/latest/download/ termux extras" > $PREFIX/etc/apt/sources.list.d/uv-termux-fix.list
-
-# Update and install
-pkg update
-pkg install uv
-```
+Replace `VERSION` with the version number from the [latest release](https://github.com/S0methingSomething/uv-termux-fix/releases/latest).
 
 ## How It Works
 
 1. Daily checks for new UV releases
-2. Fetches official Termux build script
-3. Applies platform detection patch
-4. Builds for all Termux architectures (aarch64, arm, x86_64, i686)
-5. Creates GitHub release with .deb packages
+2. Fetches the official Termux build scripts
+3. Applies the manylinux platform tag patch
+4. Builds for aarch64 (64-bit ARM)
+5. Creates a GitHub release with the .deb package
 
 ## Patch Details
 
-The patch modifies `crates/uv-python/python/get_interpreter_info.py` to only use Android platform tags on Python 3.13+, where they're officially supported per PEP 738/783.
+The patch modifies `crates/uv-python/python/get_interpreter_info.py` to always report `manylinux` instead of `android` as the platform:
 
 ```python
-# Before: Always uses android tag if available
+# Before: Uses android tag (causes cache mismatches)
 elif hasattr(sys, "getandroidapilevel"):
+    operating_system = {
+        "name": "android",
+        "api_level": sys.getandroidapilevel(),
+    }
 
-# After: Only uses android tag on Python 3.13+
-elif hasattr(sys, "getandroidapilevel") and sys.version_info >= (3, 13):
+# After: Always uses manylinux tag (matches build backend output)
+elif hasattr(sys, "getandroidapilevel"):
+    operating_system = {
+        "name": "manylinux",
+        "major": 2,
+        "minor": 17,
+    }
 ```
+
+This works because:
+
+- Almost no PyPI packages publish native `android` wheels
+- Build backends on Termux produce `manylinux`-tagged wheels
+- Using matching tags prevents UV from rebuilding packages on every invocation
+
+See the full patch at [`patches/0001-always-use-manylinux-tags-on-android-termux.patch`](patches/0001-always-use-manylinux-tags-on-android-termux.patch).
 
 ## Verification
 

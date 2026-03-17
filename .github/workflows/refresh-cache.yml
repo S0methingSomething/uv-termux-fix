@@ -154,7 +154,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
           # USE RUN_ID TO MAKE KEY UNIQUE
-          key: cargo-registry-${{ runner.os }}-${{ github.run_id }}
+          key: cargo-registry-${{ github.run_id }}
           
       # ----------------------------------------------------------------
       # SUMMARY

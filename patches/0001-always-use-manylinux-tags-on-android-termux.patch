@@ -1,0 +1,36 @@
+diff --git a/crates/uv-python/python/get_interpreter_info.py b/crates/uv-python/python/get_interpreter_info.py
+index 09e94719a..06cb878be 100644
+--- a/crates/uv-python/python/get_interpreter_info.py
++++ b/crates/uv-python/python/get_interpreter_info.py
+@@ -487,11 +487,27 @@ def get_operating_system_and_architecture():
+                 "minor": glibc_version[1],
+             }
+         elif hasattr(sys, "getandroidapilevel"):
+-            # On Python <3.13, Android reports itself as "linux"
+-            # See `operation_system == "android"` branch for Python 3.13+ below
++            # Android/Termux: Always report manylinux instead of android tags.
++            #
++            # On Python <3.13, android tags were never formalized, and build
++            # backends (setuptools, etc.) produce linux/manylinux wheels.
++            #
++            # On Python 3.13+, PEP 738/783 defined android tags, but they are
++            # broken in practice on Termux:
++            #   - sys.getandroidapilevel() returns the NDK API level baked into
++            #     the Python build (e.g. 24), while build backends like maturin
++            #     use the device's actual API level (e.g. 36), producing wheels
++            #     tagged android_36_arm64_v8a that uv then rejects as
++            #     incompatible with android_24_arm64_v8a.
++            #   - Almost no PyPI packages publish android wheels.
++            #
++            # Using manylinux tags matches what build backends actually produce
++            # and avoids cache mismatches that cause endless rebuilds.
++            # See: https://github.com/astral-sh/uv/issues/9559
+             operating_system = {
+-                "name": "android",
+-                "api_level": sys.getandroidapilevel(),
++                "name": "manylinux",
++                "major": 2,
++                "minor": 17,
+             }
+         else:
+             print(json.dumps({"result": "error", "kind": "libc_not_found"}))
