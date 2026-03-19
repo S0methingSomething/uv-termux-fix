@@ -8,180 +8,110 @@ on:
     branches: [main]
 
 jobs:
-  check-version:
-    runs-on: ubuntu-latest
-    outputs:
-      should_build: ${{ steps.check.outputs.should_build }}
-      uv_version: ${{ steps.check.outputs.uv_version }}
-    steps:
-      - name: Get latest UV version
-        id: uv_latest
-        run: |
-          UV_VERSION=$(curl -s https://api.github.com/repos/astral-sh/uv/releases/latest | jq -r .tag_name)
-          echo "version=$UV_VERSION" >> $GITHUB_OUTPUT
-          echo "📦 Latest UV version: $UV_VERSION"
-      
-      - name: Check if should build
-        id: check
-        run: |
-          UV_VERSION="${{ steps.uv_latest.outputs.version }}"
-          echo "uv_version=$UV_VERSION" >> $GITHUB_OUTPUT
-
-          # Always build on push or manual trigger
-          if [ "${{ github.event_name }}" == "push" ] || [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "✅ Build triggered by ${{ github.event_name }} - will build UV $UV_VERSION"
-          else
-            # Scheduled run: only build if there's a new upstream version
-            LATEST_RELEASE=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/latest | jq -r .tag_name 2>/dev/null || echo "none")
-            echo "🏷️  Last built version: $LATEST_RELEASE"
-
-            if [ "$LATEST_RELEASE" != "$UV_VERSION" ]; then
-              echo "should_build=true" >> $GITHUB_OUTPUT
-              echo "✅ New version detected - will build"
-            else
-              echo "should_build=false" >> $GITHUB_OUTPUT
-              echo "⏭️  Already up to date - skipping build"
-            fi
-          fi
-
-  build:
-    needs: check-version
-    if: needs.check-version.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      # ----------------------------------------------------------------
-      # CACHE 1: DOCKER IMAGE (CONSUMER MODE)
-      # We look for the cache created by the "Refresh" workflow
-      # ----------------------------------------------------------------
-      - name: Restore Docker image cache
-        id: docker-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: /tmp/docker-save
-          # We use a unique key for this run to avoid save errors...
-          key: termux-builder-image-build-${{ github.run_id }}
-          # ...but we RESTORE from the generic prefix created by the Refresh workflow
-          restore-keys: |
-            termux-builder-image-
-          
-      - name: Load or Pull Docker image
-        run: |
-          if [ "${{ steps.docker-cache.outputs.cache-hit }}" == "true" ]; then
-            echo "📦 Cache hit! Loading Docker image..."
-            docker load -i /tmp/docker-save/termux-builder.tar
-            echo "✅ Image loaded from cache"
-          else
-            echo "⚠️ Cache miss. Pulling from Docker Hub..."
-            docker pull termux/package-builder:latest
-          fi
-      
-      # ----------------------------------------------------------------
-      # CACHE 2: TERMUX PACKAGES (CONSUMER MODE)
-      # ----------------------------------------------------------------
-      - name: Restore termux-packages repo
-        id: termux-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: termux-packages
-          key: termux-packages-build-${{ github.run_id }}
-          restore-keys: |
-            termux-packages-
-            
-      - name: Clone or update termux-packages
-        run: |
-          if [ -d "termux-packages/.git" ]; then
-            echo "📦 Updating cached termux-packages..."
-            cd termux-packages
-            git fetch origin
-            git reset --hard origin/master
-            cd ..
-          else
-            echo "📥 Cloning termux-packages (first time)..."
-            git clone --depth=1 https://github.com/termux/termux-packages
-          fi
-      
-      # ----------------------------------------------------------------
-      # CACHE 3: CARGO REGISTRY (CONSUMER MODE)
-      # ----------------------------------------------------------------
-      - name: Restore Cargo registry
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: cargo-registry-build-${{ github.run_id }}
-          restore-keys: |
-            cargo-registry-
-      
-      - name: Build UV for aarch64
-        run: |
-          VERSION="${{ needs.check-version.outputs.uv_version }}"
-          echo "🔨 Building UV $VERSION for aarch64..."
-          
-          cd termux-packages
-          
-          # Update version and skip checksum
-          sed -i "s/TERMUX_PKG_VERSION=.*/TERMUX_PKG_VERSION=\"$VERSION\"/" packages/uv/build.sh
-          sed -i "s/TERMUX_PKG_SHA256=.*/TERMUX_PKG_SHA256=SKIP_CHECKSUM/" packages/uv/build.sh
-          
-          # Ensure Termux's sys-info patch exists
-          if [ ! -f "packages/uv/0001-sys-info-replace-index-with-strchr.diff" ]; then
-            echo "📥 Downloading Termux sys-info patch..."
-            wget -q -O packages/uv/0001-sys-info-replace-index-with-strchr.diff \
-              https://raw.githubusercontent.com/termux/termux-packages/master/packages/uv/0001-sys-info-replace-index-with-strchr.diff || \
-              echo "⚠️  Sys-info patch not found (may not be needed for this version)"
-          fi
-          
-          # Copy our manylinux compatibility patch for Android
-          echo "🔧 Copying Android manylinux compatibility patch..."
-          cp ../patches/0001-android-accept-manylinux-wheels.patch packages/uv/0002-android-accept-manylinux-wheels.patch
-          
-          echo "📋 Build configuration:"
-          echo "  UV Version: $VERSION"
-          echo "  Patches: sys-info fix + android manylinux compatibility"
-          echo ""
-          
-          echo "🚀 Starting build..."
-          ./scripts/run-docker.sh ./build-package.sh -I -a aarch64 uv
-          
-          # Verify the build output
-          if [ -f "output/uv_${VERSION}_aarch64.deb" ]; then
-            echo "✅ Build complete! Package created:"
-            ls -lh output/uv_*.deb
-          else
-            echo "❌ Build failed - .deb package not found"
-            exit 1
-          fi
-          
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: uv-aarch64
-          path: termux-packages/output/*.deb
-          retention-days: 30
-
-  release:
-    needs: [check-version, build]
+  build-and-release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: debs
 
-      - name: Fetch upstream changelog
-        id: changelog
+      # ---------------------------------------------------------------
+      # VERSION CHECK
+      # ---------------------------------------------------------------
+      - name: Check if should build
+        id: check
         run: |
-          VERSION="${{ needs.check-version.outputs.uv_version }}"
-          echo "Fetching changelog for UV $VERSION..."
+          UV_VERSION=$(curl -s https://api.github.com/repos/astral-sh/uv/releases/latest | jq -r .tag_name)
+          echo "uv_version=$UV_VERSION" >> $GITHUB_OUTPUT
+          echo "Latest UV version: $UV_VERSION"
+
+          if [ "${{ github.event_name }}" == "push" ] || [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "Build triggered by ${{ github.event_name }}"
+          else
+            LATEST_RELEASE=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/latest | jq -r .tag_name 2>/dev/null || echo "none")
+            echo "Last built version: $LATEST_RELEASE"
+            if [ "$LATEST_RELEASE" != "$UV_VERSION" ]; then
+              echo "should_build=true" >> $GITHUB_OUTPUT
+              echo "New version detected - will build"
+            else
+              echo "should_build=false" >> $GITHUB_OUTPUT
+              echo "Already up to date - skipping build"
+            fi
+          fi
+
+      # ---------------------------------------------------------------
+      # SETUP
+      # ---------------------------------------------------------------
+      - name: Clone termux-packages
+        if: steps.check.outputs.should_build == 'true'
+        run: git clone --depth=1 https://github.com/termux/termux-packages
+
+      # Cache the Rust compilation artifacts (.termux-build contains
+      # the cargo target/ directory). This is the single biggest
+      # speed-up — avoids recompiling ~800 crates from scratch.
+      - name: Restore build cache
+        if: steps.check.outputs.should_build == 'true'
+        id: build-cache
+        uses: actions/cache@v4
+        with:
+          path: .termux-build
+          key: termux-build-${{ steps.check.outputs.uv_version }}-${{ github.sha }}
+          restore-keys: |
+            termux-build-${{ steps.check.outputs.uv_version }}-
+            termux-build-
+
+      # ---------------------------------------------------------------
+      # BUILD
+      # ---------------------------------------------------------------
+      - name: Build UV for aarch64
+        if: steps.check.outputs.should_build == 'true'
+        run: |
+          VERSION="${{ steps.check.outputs.uv_version }}"
+          echo "Building UV $VERSION for aarch64..."
+
+          cd termux-packages
+
+          # Update version and skip checksum
+          sed -i "s/TERMUX_PKG_VERSION=.*/TERMUX_PKG_VERSION=\"$VERSION\"/" packages/uv/build.sh
+          sed -i "s/TERMUX_PKG_SHA256=.*/TERMUX_PKG_SHA256=SKIP_CHECKSUM/" packages/uv/build.sh
+
+          # Ensure Termux's sys-info patch exists
+          if [ ! -f "packages/uv/0001-sys-info-replace-index-with-strchr.diff" ]; then
+            wget -q -O packages/uv/0001-sys-info-replace-index-with-strchr.diff \
+              https://raw.githubusercontent.com/termux/termux-packages/master/packages/uv/0001-sys-info-replace-index-with-strchr.diff || \
+              echo "Sys-info patch not found (may not be needed for this version)"
+          fi
+
+          # Copy our manylinux compatibility patch
+          cp ../patches/0001-android-accept-manylinux-wheels.patch packages/uv/0002-android-accept-manylinux-wheels.patch
+
+          echo "Build configuration:"
+          echo "  UV Version: $VERSION"
+          echo "  Patches: sys-info fix + android manylinux compatibility"
+
+          # Mount the build cache into the container so cargo can
+          # reuse previously compiled artifacts.
+          mkdir -p ../.termux-build
+          export TERMUX_DOCKER_RUN_EXTRA_ARGS="--volume ${{ github.workspace }}/.termux-build:/home/builder/.termux-build"
+
+          ./scripts/run-docker.sh ./build-package.sh -I -a aarch64 uv
+
+          if [ -f "output/uv_${VERSION}_aarch64.deb" ]; then
+            echo "Build complete!"
+            ls -lh output/uv_*.deb
+          else
+            echo "Build failed - .deb package not found"
+            exit 1
+          fi
+
+      # ---------------------------------------------------------------
+      # RELEASE
+      # ---------------------------------------------------------------
+      - name: Create release
+        if: steps.check.outputs.should_build == 'true'
+        run: |
+          VERSION="${{ steps.check.outputs.uv_version }}"
 
           BODY=$(curl -sfL \
             "https://api.github.com/repos/astral-sh/uv/releases/tags/$VERSION" \
@@ -191,7 +121,6 @@ jobs:
             BODY="*Could not fetch upstream changelog. See [astral-sh/uv releases](https://github.com/astral-sh/uv/releases/tag/$VERSION).*"
           fi
 
-          # Write to a file to avoid shell escaping issues
           {
             echo '> **This is a modified build of UV for Termux.** It includes a patch that makes UV accept both `android` and `manylinux` tagged wheels, fixing cache mismatches that cause endless package rebuilds ([#9559](https://github.com/astral-sh/uv/issues/9559)).'
             echo ''
@@ -210,13 +139,14 @@ jobs:
             echo "$BODY"
           } > /tmp/release-body.md
 
-      - name: Create Release
+      - name: Publish release
+        if: steps.check.outputs.should_build == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.check-version.outputs.uv_version }}
-          name: UV ${{ needs.check-version.outputs.uv_version }} for Termux (modified)
+          tag_name: ${{ steps.check.outputs.uv_version }}
+          name: UV ${{ steps.check.outputs.uv_version }} for Termux (modified)
           body_path: /tmp/release-body.md
-          files: debs/**/*.deb
+          files: termux-packages/output/*.deb
           draft: false
           prerelease: false
         env:
