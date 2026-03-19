@@ -1,0 +1,38 @@
+diff --git a/crates/uv-platform-tags/src/tags.rs b/crates/uv-platform-tags/src/tags.rs
+index a8f26ddf9..ee8e65f8a 100644
+--- a/crates/uv-platform-tags/src/tags.rs
++++ b/crates/uv-platform-tags/src/tags.rs
+@@ -698,6 +698,33 @@ fn compatible_tags(platform: &Platform) -> Result<Vec<PlatformTag>, PlatformErro
+                 });
+             }
+ 
++            // On Android/Termux, build backends like setuptools and maturin
++            // produce manylinux-tagged wheels rather than android-tagged wheels.
++            // To ensure UV accepts these wheels (and avoids endless cache-miss
++            // rebuilds), we also generate manylinux compatible tags.
++            // See: https://github.com/astral-sh/uv/issues/9559
++            if let Some(min_minor) = arch.get_minimum_manylinux_minor() {
++                for minor in (min_minor..=17).rev() {
++                    platform_tags.push(PlatformTag::Manylinux {
++                        major: 2,
++                        minor,
++                        arch,
++                    });
++                    // Support legacy manylinux tags with lower priority
++                    // <https://peps.python.org/pep-0600/#legacy-manylinux-tags>
++                    if minor == 12 {
++                        platform_tags.push(PlatformTag::Manylinux2010 { arch });
++                    }
++                    if minor == 17 {
++                        platform_tags.push(PlatformTag::Manylinux2014 { arch });
++                    }
++                    if minor == 5 {
++                        platform_tags.push(PlatformTag::Manylinux1 { arch });
++                    }
++                }
++                platform_tags.push(PlatformTag::Linux { arch });
++            }
++
+             platform_tags
+         }
+         (Os::Pyodide { major, minor }, Arch::Wasm32) => {

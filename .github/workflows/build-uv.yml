@@ -127,13 +127,13 @@ jobs:
               echo "⚠️  Sys-info patch not found (may not be needed for this version)"
           fi
           
-          # Copy our manylinux platform tag patch
-          echo "🔧 Copying manylinux platform tag patch..."
-          cp ../patches/0001-always-use-manylinux-tags-on-android-termux.patch packages/uv/0002-always-use-manylinux-tags-on-android-termux.patch
+          # Copy our manylinux compatibility patch for Android
+          echo "🔧 Copying Android manylinux compatibility patch..."
+          cp ../patches/0001-android-accept-manylinux-wheels.patch packages/uv/0002-android-accept-manylinux-wheels.patch
           
           echo "📋 Build configuration:"
           echo "  UV Version: $VERSION"
-          echo "  Patches: sys-info fix + manylinux platform tags"
+          echo "  Patches: sys-info fix + android manylinux compatibility"
           echo ""
           
           echo "🚀 Starting build..."
@@ -184,7 +184,7 @@ jobs:
 
           # Write to a file to avoid shell escaping issues
           {
-            echo '> **This is a modified build of UV for Termux.** It includes a patch that forces `manylinux_2_17` platform tags instead of `android`, fixing cache mismatches that cause endless package rebuilds ([#9559](https://github.com/astral-sh/uv/issues/9559)).'
+            echo '> **This is a modified build of UV for Termux.** It includes a patch that makes UV accept both `android` and `manylinux` tagged wheels, fixing cache mismatches that cause endless package rebuilds ([#9559](https://github.com/astral-sh/uv/issues/9559)).'
             echo ''
             echo '## Installation'
             echo ''
